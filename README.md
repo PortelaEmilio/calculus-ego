@@ -5,6 +5,13 @@ video, it detects each person, then runs a vision-language model to classify
 them across the categories below, producing structured output for statistical
 analysis.
 
+## Demo
+
+▶️ **[Annotated video sample (1080p)](https://portela-navarro.com/assets/friends-intro-annotated-1080p.mp4)**
+— the pipeline's per-person annotations rendered on a short clip (detection,
+pose, and the classification labels). GitHub does not embed external `.mp4`
+files inline, so the link opens the video in your browser.
+
 ## Categories
 
 Per detected person:
