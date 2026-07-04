@@ -1,0 +1,2 @@
+models/beauty_adapter/*.safetensors filter=lfs diff=lfs merge=lfs -text
+models/beauty_adapter/*.bin filter=lfs diff=lfs merge=lfs -text

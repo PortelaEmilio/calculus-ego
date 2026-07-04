@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Model weights (downloaded by ultralytics on first run)
+*.pt
+*.pth
+*.onnx
+
+# Pipeline output and runs
+output/
+runs/
+
+# Data (not tracked — may be sensitive)
+*.csv
+*.xlsx
+*.xls
+multimedia_downloads/
+
+# Media
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.bmp
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
