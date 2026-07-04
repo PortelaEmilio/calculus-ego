@@ -7,10 +7,11 @@ analysis.
 
 ## Demo
 
-▶️ **[Annotated video sample (1080p)](https://portela-navarro.com/assets/friends-intro-annotated-1080p.mp4)**
+🌐 **Live demo: [portela-navarro.com/demo](https://portela-navarro.com/demo)**
+
+▶️ Annotated video sample (1080p): [direct link](https://portela-navarro.com/assets/friends-intro-annotated-1080p.mp4)
 — the pipeline's per-person annotations rendered on a short clip (detection,
-pose, and the classification labels). GitHub does not embed external `.mp4`
-files inline, so the link opens the video in your browser.
+pose, and the classification labels).
 
 ## Categories
 
