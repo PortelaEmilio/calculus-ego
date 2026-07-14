@@ -37,6 +37,7 @@ from config import (
 )
 from processing.video import (
     detect_scene_changes, detect_face_keypoint_changes_in_scene, analyze_scene_vlm,
+    _update_beauty_candidate,
 )
 from processing import person_dedup
 from utils.visualization import is_frontal_pose_with_waist, count_visible_keypoints
@@ -121,7 +122,7 @@ def _prescan_with_kpts(scene_frames_data: list) -> dict:
                 continue
             track_id = int(ids[idx]) if ids is not None else f"det_{local_idx}_{idx}"
             if track_id not in best:
-                best[track_id] = {'general': None, 'body_shape': None, 'frames': set()}
+                best[track_id] = {'general': None, 'body_shape': None, 'beauty': None, 'frames': set()}
             # frames en los que aparece este track (para el guard de co-ocurrencia
             # del dedup: dos tracks que comparten frame son personas distintas).
             best[track_id].setdefault('frames', set()).add(local_idx)
@@ -152,6 +153,13 @@ def _prescan_with_kpts(scene_frames_data: list) -> dict:
                             'crop': crop.copy(), 'score': body_score,
                             'frame_local_idx': local_idx,
                         }
+
+            # Belleza: selecciona el MEJOR frame de cara por track (nitidez + nº de
+            # keypoints faciales) y guarda el crop de cara, para puntuar en Fase B.
+            # Misma lógica que el path de vídeo de single/batch (production).
+            if config.ENABLE_BEAUTY_ESTIMATION and kpts is not None:
+                _update_beauty_candidate(best[track_id], frame,
+                                         np.asarray(kpts), (x1, y1, x2, y2), local_idx)
             person_idx += 1
     return best
 
@@ -235,6 +243,10 @@ def detect_video_scenes(video_path: Path, model_detect, model_pose,
             if cand.get('body_shape') and cand['body_shape'].get('crop') is not None:
                 body_file = phase1_dir / f"{stem}_scene_{safe}_person_{pidx}_track_{tid}_body.jpg"
                 cv2.imwrite(str(body_file), cand['body_shape']['crop'])
+            beauty_file = None
+            if cand.get('beauty') and cand['beauty'].get('face_crop') is not None:
+                beauty_file = phase1_dir / f"{stem}_scene_{safe}_person_{pidx}_track_{tid}_face.jpg"
+                cv2.imwrite(str(beauty_file), cand['beauty']['face_crop'])
             persons.append({
                 'track_id': tid,
                 'bbox': [int(v) for v in gen['bbox']],
@@ -242,6 +254,7 @@ def detect_video_scenes(video_path: Path, model_detect, model_pose,
                 'kpts': gen.get('kpts'),
                 'general_crop_file': str(crop_file),
                 'body_crop_file': str(body_file) if body_file else None,
+                'beauty_crop_file': str(beauty_file) if beauty_file else None,
             })
         if persons:
             out_scenes.append({
@@ -324,7 +337,7 @@ def _merge_best(acc: dict, new: dict):
         if tid not in acc:
             acc[tid] = cand
             continue
-        for kind in ('general', 'body_shape'):
+        for kind in ('general', 'body_shape', 'beauty'):
             n = cand.get(kind)
             if n is None:
                 continue
@@ -347,30 +360,46 @@ def categorize_video_scenes(meta: dict, models: dict) -> dict:
 
     out_scenes = []
     all_tracks = set()
+    # Belleza DIFERIDA (2026-07-10): igual que en imágenes, la belleza NO se puntúa
+    # durante la clasificación; se recogen los rostros demand/* (crop de cara de la
+    # Fase A) y se puntúan al final del vídeo, tras clasificar todas sus escenas.
+    beauty_pending = []  # (person_dict, face_crop ndarray)
 
     for sc in meta.get('scenes', []):
         # Reconstruir best_candidates con los crops cargados de disco.
         best_candidates = {}
         for p in sc['persons']:
             tid = p['track_id']
-            gen_crop = cv2.imread(p['general_crop_file'])
+            # Guard de existencia antes de imread: los crops son efímeros (se borran al
+            # final de cada tanda). Sin esto, un phase1 huérfano dispara un diluvio de
+            # WARN de OpenCV y silenciosamente salta a la persona (0 escenas falsas).
+            gcf = p['general_crop_file']
+            if not gcf or not Path(gcf).exists():
+                continue
+            gen_crop = cv2.imread(gcf)
             if gen_crop is None:
                 continue
             entry = {
                 'general': {'crop': gen_crop, 'frame_local_idx': 0, 'bbox': tuple(p['bbox'])},
                 'beauty': None, 'body_shape': None,
             }
-            if p.get('body_crop_file'):
+            if p.get('body_crop_file') and Path(p['body_crop_file']).exists():
                 bc = cv2.imread(p['body_crop_file'])
                 if bc is not None:
                     entry['body_shape'] = {'crop': bc, 'frame_local_idx': 0}
+            if p.get('beauty_crop_file') and Path(p['beauty_crop_file']).exists():
+                fc = cv2.imread(p['beauty_crop_file'])
+                if fc is not None:
+                    # face_crop ya recortado en Fase A → analyze_scene_vlm lo puntúa.
+                    entry['beauty'] = {'face_crop': fc, 'frame_local_idx': 0}
             best_candidates[tid] = entry
             all_tracks.add(tid)
 
         if not best_candidates:
             continue
 
-        first_frame = cv2.imread(sc['frame_file']) if sc.get('frame_file') else None
+        first_frame = (cv2.imread(sc['frame_file'])
+                       if sc.get('frame_file') and Path(sc['frame_file']).exists() else None)
 
         caches, _classifications, _ocr = analyze_scene_vlm(
             best_candidates, first_frame, sc['scene_label'],
@@ -382,7 +411,7 @@ def categorize_video_scenes(meta: dict, models: dict) -> dict:
             body_shape_classifier=models.get('body_shape_classifier'),
             accessory_classifier=models.get('accessory_classifier'),
             ocr_classifier=models.get('ocr_classifier'),
-            beauty_estimator=models.get('beauty_estimator'),
+            beauty_estimator=None,  # belleza DIFERIDA (demand/*), ver post-bucle
             gender_classifier=models.get('gender_classifier'),
             age_classifier=models.get('age_classifier'),
             person_attributes_classifier=models.get('person_attributes_classifier'),
@@ -427,7 +456,7 @@ def categorize_video_scenes(meta: dict, models: dict) -> dict:
                 cat: (int(acc_data.get(cat, 0)) if isinstance(acc_data, dict) else None)
                 for cat in ACCESSORY_CATEGORIES
             }
-            persons.append({
+            person_row = {
                 'track_id': tid,
                 'crop_path': p['general_crop_file'],
                 'bbox': p['bbox'],
@@ -439,10 +468,19 @@ def categorize_video_scenes(meta: dict, models: dict) -> dict:
                 'location':          _get('location', tid, 'location'),
                 'weight':            _get('body_shape', tid, 'body_weight'),
                 'muscle':            _get('body_shape', tid, 'muscle'),
+                'attire':            _get('body_shape', tid, 'attire'),
                 'accessories':       accessories,
-                'beauty':            _get('beauty', tid, 'score'),
+                'beauty':            None,   # pase DIFERIDO demand/* (post-bucle)
                 'social_distance':      sd_by_track.get(tid),
-            })
+            }
+            persons.append(person_row)
+
+            # Candidato al pase diferido de belleza: demand/* con crop de cara.
+            beh = person_row.get('behaviour')
+            face_cand = best_candidates.get(tid, {}).get('beauty')
+            if (isinstance(beh, str) and beh.startswith('demand')
+                    and face_cand and face_cand.get('face_crop') is not None):
+                beauty_pending.append((person_row, face_cand['face_crop']))
 
         out_scenes.append({
             'scene_label': sc['scene_label'],
@@ -451,6 +489,24 @@ def categorize_video_scenes(meta: dict, models: dict) -> dict:
             'frame_path': sc.get('frame_file'),
             'persons': persons,
         })
+
+    # ── Pase DIFERIDO de belleza (solo demand/*, 2026-07-10) ──
+    # Tras clasificar TODAS las escenas del vídeo, se puntúan los rostros demand/*
+    # recogidos (mismo gating que imágenes). Degrada con elegancia: sin estimador /
+    # --no-beauty → los person_row quedan con beauty=None.
+    import config as _config
+    est = models.get('beauty_estimator')
+    if (beauty_pending and est is not None
+            and getattr(_config, "ENABLE_BEAUTY_PASS", True)):
+        from ui import info as _info
+        _info(f"    Belleza diferida (demand/*): {len(beauty_pending)} rostro(s)…")
+        for person_row, face_crop in beauty_pending:
+            try:
+                r = est.estimate(face_crop)
+            except Exception:
+                r = None
+            if r and r.get('success'):
+                person_row['beauty'] = r.get('score')
 
     return {
         'input_path': meta.get('video_path'),

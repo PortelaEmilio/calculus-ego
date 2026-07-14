@@ -272,6 +272,12 @@ def annotate_frame(frame: np.ndarray, results_detect, results_pose,
         all_metadata = []
 
         person_idx = 0  # Contador específico para personas detectadas
+        # xyxy de TODA detección contada en num_persons_yolo (aceptada O filtrada
+        # por BBOX_MIN_FRAME_RATIO). El pose-loop deduplica contra esta lista;
+        # si solo comparara contra las aceptadas, una caja filtrada por ratio se
+        # recontaría al reaparecer como pose-box (con pose-único son las mismas
+        # cajas → doble conteo sistemático en `IA Nº pers.`).
+        seen_xyxy = []
         if has_detect_boxes:
             for idx, box in enumerate(boxes):
                 if int(box.cls) != PERSON_CLASS_ID:
@@ -288,6 +294,7 @@ def annotate_frame(frame: np.ndarray, results_detect, results_pose,
                 # YOLO26 sí detectó persona aquí — cuenta en el total aunque
                 # luego se filtre por tamaño de bbox.
                 num_persons_yolo += 1
+                seen_xyxy.append((x1, y1, x2, y2))
 
                 # Filtro por ratio del frame: ignorar detecciones cuyo bbox
                 # cubre menos del BBOX_MIN_FRAME_RATIO del área total. El VLM
@@ -317,14 +324,17 @@ def annotate_frame(frame: np.ndarray, results_detect, results_pose,
 
         # Segundo paso: añadir personas detectadas sólo por el modelo de pose
         # (cuando el detector las pierde pero el pose-model sí las encuentra).
-        # Dedup por IoU contra las cajas ya aceptadas para evitar doble conteo.
+        # Dedup por IoU contra TODAS las cajas ya contadas (aceptadas Y filtradas
+        # por ratio) para evitar doble conteo: con pose-único las pose-boxes son
+        # las mismas del detect-loop, y una caja filtrada por ratio reaparecería
+        # aquí y se recontaría en num_persons_yolo (bug corregido 2026-07-09).
         if pose_boxes is not None:
-            existing_xyxy = [(m[2], m[3], m[4], m[5]) for m in all_metadata]
+            existing_xyxy = list(seen_xyxy)
             for pose_idx, pose_box in enumerate(pose_boxes):
                 x1, y1, x2, y2 = map(int, pose_box.xyxy[0])
                 candidate = (x1, y1, x2, y2)
 
-                # Dedup contra detect-boxes ya aceptadas
+                # Dedup contra toda caja ya contada en el detect-loop o en este loop
                 max_iou = max((_iou_xyxy(candidate, e) for e in existing_xyxy), default=0.0)
                 if max_iou >= 0.3:
                     continue
@@ -338,6 +348,7 @@ def annotate_frame(frame: np.ndarray, results_detect, results_pose,
                 # el dedup IoU de arriba) — cuenta en el total aunque luego se
                 # filtre por tamaño.
                 num_persons_yolo += 1
+                existing_xyxy.append(candidate)
 
                 # Filtro por ratio del frame (mismo motivo que en detect-loop)
                 bbox_area = max(0, x2 - x1) * max(0, y2 - y1)
@@ -356,7 +367,6 @@ def annotate_frame(frame: np.ndarray, results_detect, results_pose,
 
                 all_crops.append(person_crop)
                 all_metadata.append((person_idx, track_id, x1, y1, x2, y2, has_shoulder_visible, kpts, pose_box))
-                existing_xyxy.append(candidate)
                 person_idx += 1
 
         # Resultados completos — inicializados antes del bucle de recolección
@@ -749,18 +759,25 @@ def annotate_frame(frame: np.ndarray, results_detect, results_pose,
                         "raw_response": err_response
                     })
 
-            # Guardar peso corporal + musculatura (silueta ELIMINADA 2026-07-04)
+            # Guardar peso corporal + musculatura + vestimenta (silueta ELIMINADA 2026-07-04)
             if body_shape_info and body_shape_info.get("success"):
+                # Vestimenta: el VLM decide directamente (incl. "not visible"). El gate de
+                # hombros se ELIMINÓ el 2026-07-08 — degradaba κ 0.85→0.71 en el sample 500
+                # (forzaba a "not visible" prendas identificables con pose parcial; el VLM
+                # ya acierta el "not visible" real con recall 1.0). Ver CLAUDE.md.
+                attire_eff = body_shape_info.get("attire")
                 body_shape_classifications.append({
                     "track_id": track_id,
                     "frame": frame_idx,
                     "body_weight": body_shape_info.get("body_weight"),
                     "muscle": body_shape_info.get("muscle"),
+                    "attire": attire_eff,
                     "raw_response": body_shape_info.get("raw_response")
                 })
                 body_shape_cache[track_id] = {
                     "body_weight": body_shape_info.get("body_weight"),
                     "muscle": body_shape_info.get("muscle"),
+                    "attire": attire_eff,
                     "last_frame": frame_idx,
                     "raw_response": body_shape_info.get("raw_response")
                 }
@@ -771,6 +788,7 @@ def annotate_frame(frame: np.ndarray, results_detect, results_pose,
                         "success": True,
                         "body_weight": cached_body_shape.get("body_weight"),
                         "muscle": cached_body_shape.get("muscle"),
+                        "attire": cached_body_shape.get("attire"),
                         "raw_response": cached_body_shape.get("raw_response")
                     }
 
@@ -1387,10 +1405,19 @@ def process_image(image_path: Path, model_detect, model_pose,
         from ultralytics.engine.results import Results
         results_pose = [Results(orig_img=img, path=str(image_path), names={}, boxes=None, keypoints=None)]
 
+    # Belleza inline solo si además está permitida en el path de IMAGEN
+    # (ENABLE_BEAUTY_INLINE_IMAGES=False → la belleza la da SOLO el pase
+    # diferido demand/*; evita puntuar 2 veces cada cara). Vídeo no pasa por aquí.
+    _beauty_inline_ok = ENABLE_BEAUTY_ESTIMATION and getattr(
+        config, "ENABLE_BEAUTY_INLINE_IMAGES", True)
+    # SAVE_ANNOTATED_OUTPUTS=False (modo carpeta): no persistir nada — output_dir=None
+    # suprime person_crops/ y person_crops_annotated/ dentro de annotate_frame, y abajo
+    # se salta el imwrite de {stem}_annotated.jpg. La clasificación no cambia.
+    _save_outputs = getattr(config, "SAVE_ANNOTATED_OUTPUTS", True)
     annotated, stats, _, _, _, _, _, _, _, _, _ = annotate_frame(
         img, results_detect, results_pose,
         with_tracking=False,
-        beauty_estimator=beauty_estimator if ENABLE_BEAUTY_ESTIMATION else None,
+        beauty_estimator=beauty_estimator if _beauty_inline_ok else None,
         gender_classifier=gender_classifier if ENABLE_GENDER_CLASSIFICATION else None,
         age_classifier=age_classifier if ENABLE_AGE_CLASSIFICATION else None,
         behaviour_classifier=behaviour_classifier if ENABLE_BEHAVIOUR_CLASSIFICATION else None,
@@ -1403,7 +1430,7 @@ def process_image(image_path: Path, model_detect, model_pose,
         person_attributes_classifier=person_attributes_classifier,
         scene_context_classifier=scene_context_classifier,
         frame_idx=0,
-        output_dir=output_dir,
+        output_dir=output_dir if _save_outputs else None,
         scene_number=1,
         total_scenes=1,
         output_basename=image_path.stem,
@@ -1417,17 +1444,18 @@ def process_image(image_path: Path, model_detect, model_pose,
             num_keypoints += int(visible)
 
     output_path = output_dir / f"{image_path.stem}_annotated.jpg"
-    cv2.imwrite(str(output_path), annotated)
+    if _save_outputs:
+        cv2.imwrite(str(output_path), annotated)
     info(
         f"  [dim]{w}×{h}[/]  personas=[cyan]{stats['num_persons']}[/]"
         + (f"[dim]/{stats['num_persons_yolo']}yolo[/]" if stats['num_persons_yolo'] != stats['num_persons'] else "")
         + (f"  kpts=[cyan]{num_keypoints}[/]" if ENABLE_POSE_ESTIMATION else "")
-        + f"  [dim]→ {output_path.name}"
+        + (f"  [dim]→ {output_path.name}" if _save_outputs else "  [dim](sin anotada: SAVE_ANNOTATED_OUTPUTS=False)")
     )
 
     result_info = {
         "input_path": str(image_path),
-        "output_path": str(output_path),
+        "output_path": str(output_path) if _save_outputs else None,
         "resolution": {"width": w, "height": h},
         "persons_detected": stats['num_persons'],
         "persons_detected_yolo": stats['num_persons_yolo'],
@@ -1470,7 +1498,14 @@ def process_image(image_path: Path, model_detect, model_pose,
             if raw.startswith("keypoints:") or raw.startswith("shortcut:") or raw == "no_keypoints" or raw == "no_waist_keypoints":
                 valid += 1
                 continue
-            val_candidates = [it.get(k) for k in ("gender", "age_group", "behaviour", "activity", "body_display", "location", "silhouette", "category") if k in it]
+            # "body_weight" reemplaza a "silhouette" (eliminada 2026-07-04); sin él,
+            # body_shape contaba SIEMPRE como fallo y todo run salía "partial".
+            val_candidates = [it.get(k) for k in ("gender", "age_group", "behaviour", "activity", "body_display", "location", "body_weight", "category") if k in it]
+            # Accesorios: la entrada no tiene clave de valor única, sino una clave 0/1
+            # por categoría; su presencia significa que el parseo fue correcto.
+            if not val_candidates and any(cat in it for cat in ACCESSORY_CATEGORIES):
+                valid += 1
+                continue
             val = val_candidates[0] if val_candidates else None
             if val in (None, "no visible", "na", ""):
                 continue
@@ -1497,3 +1532,94 @@ def process_image(image_path: Path, model_detect, model_pose,
         warn(f"  VLM {vlm_status}: {missing}/{expected} fallos ({vlm_failure_rate:.0%})")
 
     return result_info
+
+
+def rerender_annotated_with_beauty(image_path: Path, output_dir: Path,
+                                   summary_result: dict, beauty_by_track: dict,
+                                   model_detect, model_pose,
+                                   social_distance_classifier=None) -> bool:
+    """Re-dibuja `{stem}_annotated.jpg` inyectando la belleza del pase DIFERIDO.
+
+    En el path de IMAGEN la belleza es un pase diferido (demand/*) que corre DESPUÉS de que
+    `process_image` ya guardó la imagen anotada → el chip de belleza nunca aparecía. Esta
+    función re-renderiza la imagen SIN re-llamar al VLM: re-ejecuta solo YOLO (determinista →
+    reproduce los mismos track_ids/orden en una imagen fija) y reconstruye todos los `*_info`
+    desde el `summary_result` vía los caches de `annotate_frame`, con `beauty_cache`
+    pre-rellenado desde `beauty_by_track` (track_id → score numérico).
+
+    Reusa exactamente los mismos primitivos de dibujo → salida pixel-idéntica + el chip de
+    belleza. Degrada con elegancia: sin scores o si no se puede releer la imagen → no toca nada
+    y devuelve False.
+    """
+    # Solo scores numéricos (descarta None / not_calculable).
+    scored = {t: float(s) for t, s in (beauty_by_track or {}).items()
+              if isinstance(s, (int, float))}
+    if not scored:
+        return False
+
+    img = cv2.imread(str(image_path))
+    if img is None:
+        return False
+
+    _use_pose_detector = getattr(config, "USE_POSE_AS_DETECTOR", False) and ENABLE_POSE_ESTIMATION
+    _detect_kwargs = dict(source=img, conf=CONFIDENCE_THRESHOLD, iou=IOU_THRESHOLD,
+                          classes=[PERSON_CLASS_ID], verbose=False)
+    if _use_pose_detector:
+        _detect_kwargs["imgsz"] = getattr(config, "YOLO_POSE_IMGSZ", 640)
+    results_detect = model_detect.predict(**_detect_kwargs)
+    if _use_pose_detector:
+        results_pose = results_detect
+    elif ENABLE_POSE_ESTIMATION:
+        results_pose = model_pose.predict(source=img, conf=CONFIDENCE_THRESHOLD, verbose=False)
+    else:
+        from ultralytics.engine.results import Results
+        results_pose = [Results(orig_img=img, path=str(image_path), names={}, boxes=None, keypoints=None)]
+
+    def _by_track(lst):
+        return {c["track_id"]: c for c in (lst or []) if c.get("track_id") is not None}
+
+    g   = _by_track(summary_result.get("gender_classifications"))
+    a   = _by_track(summary_result.get("age_classifications"))
+    b   = _by_track(summary_result.get("behaviour_classifications"))
+    act = _by_track(summary_result.get("activity_classifications"))
+    bd  = _by_track(summary_result.get("body_display_classifications"))
+    loc = _by_track(summary_result.get("location_classifications"))
+    bs  = _by_track(summary_result.get("body_shape_classifications"))
+    acc = _by_track(summary_result.get("accessory_classifications"))
+
+    gender_cache       = {t: {"gender": c.get("gender"), "last_frame": 0, "raw_response": ""} for t, c in g.items()}
+    age_cache          = {t: {"age_group": c.get("age_group"), "last_frame": 0, "raw_response": ""} for t, c in a.items()}
+    behaviour_cache    = {t: {"behaviour": c.get("behaviour"), "last_frame": 0, "raw_response": c.get("raw_response", "")} for t, c in b.items()}
+    activity_cache     = {t: {"activity": c.get("activity"), "last_frame": 0, "raw_response": c.get("raw_response", "")} for t, c in act.items()}
+    body_display_cache = {t: {"body_display": c.get("body_display"), "last_frame": 0, "raw_response": c.get("raw_response", "")} for t, c in bd.items()}
+    location_cache     = {t: {"location": c.get("location"), "last_frame": 0, "raw_response": c.get("raw_response", "")} for t, c in loc.items()}
+    body_shape_cache   = {t: {"body_weight": c.get("body_weight"), "muscle": c.get("muscle"),
+                              "attire": c.get("attire"), "last_frame": 0,
+                              "raw_response": c.get("raw_response", "")} for t, c in bs.items()}
+    accessory_cache = {}
+    for t, c in acc.items():
+        entry = {"last_frame": 0, "raw_response": c.get("raw_response", "")}
+        for cat in ACCESSORY_CATEGORIES:
+            entry[cat] = c.get(cat, 0)
+        accessory_cache[t] = entry
+    beauty_cache = {t: {"score": s, "last_frame": 0, "raw_response": ""} for t, s in scored.items()}
+
+    # classifiers=None + caches llenos → annotate_frame NO llama al VLM, reconstruye desde cache.
+    # beauty_estimator=None + beauty_cache → dibuja el score cacheado (solo demand/*).
+    # social_distance_classifier es determinista por keypoints (sin coste VLM) → recomputa igual.
+    annotated, *_ = annotate_frame(
+        img, results_detect, results_pose,
+        with_tracking=False,
+        beauty_estimator=None,
+        social_distance_classifier=social_distance_classifier if ENABLE_SOCIAL_DISTANCE else None,
+        gender_cache=gender_cache, age_cache=age_cache,
+        behaviour_cache=behaviour_cache, activity_cache=activity_cache,
+        body_display_cache=body_display_cache, location_cache=location_cache,
+        body_shape_cache=body_shape_cache, accessory_cache=accessory_cache,
+        beauty_cache=beauty_cache,
+        frame_idx=0, output_dir=None, scene_number=1, total_scenes=1,
+        output_basename=image_path.stem,
+    )
+    output_path = output_dir / f"{image_path.stem}_annotated.jpg"
+    cv2.imwrite(str(output_path), annotated)
+    return True

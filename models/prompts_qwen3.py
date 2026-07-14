@@ -21,7 +21,7 @@ API expuesta (idéntica a prompts_ollama_cot / prompts_gemma4_official):
 """
 from typing import Final
 
-PROMPT_VERSION: Final = "qwen3_nosilhouette_20260704"
+PROMPT_VERSION: Final = "qwen3_attire_20260708"
 
 # Social distance: JSON de partes-visibles que `social_distance.py:_map_parts_to_category()`
 # parsea por su cuenta. El proxy JsonFlatteningBackend NO lo toca (solo aplana person_attrs/scene).
@@ -114,6 +114,15 @@ _MUSCLE_DEF: Final = """muscle — visible muscle definition on the person's bod
 - not visible: no apparent muscle definition (soft, smooth body contours, no muscle separation) OR the body cannot be assessed at all (only the head/bust is shown, the body is occluded, or the person is too distant/blurred to judge).
 Indicators: muscle relief and separation on arms, shoulders, and torso. NEVER infer musculature from clothing style (e.g. sportswear) or pose alone — judge the actual body."""
 
+_ATTIRE_DEF: Final = """attire — the STYLE/formality of the garments the person is wearing. Judge the KIND of clothing, NOT how much skin is exposed (skin exposure is a SEPARATE category). Assign the FIRST class that fits:
+1) underwear/swimwear — the person is wearing ONLY swimwear or underwear: bikini, swimsuit, swim trunks, bra, briefs, boxers, lingerie. Beachwear worn as the sole garment counts here.
+2) sportswear — athletic/gym clothing built for exercise: tracksuit, gym shorts + athletic top, leggings + sports bra, football/basketball kit or team jersey worn to play, cycling/running gear, martial-arts gi.
+3) uniform — an occupational or institutional uniform that signals a role: military fatigues or dress uniform, police/firefighter/medical/security/pilot/chef/waiter/school uniform, or a numbered team uniform worn as a formal kit.
+4) formal — dressy or ceremonial clothing: suit and tie, blazer with dress trousers, tuxedo, evening gown, cocktail dress, or TRADITIONAL/CULTURAL formal dress (kimono, sari, tunic, kilt, thobe, regional costume).
+5) casual — everyday street clothing not covered above: t-shirt, jeans, jumper, hoodie, casual dress, shorts with a normal top, everyday jacket. DEFAULT when the outfit is ordinary or ambiguous but the body is visible.
+- not visible: cannot judge the clothing — only the head/bust is shown, the person is heavily occluded, or too distant/blurred.
+Indicators: garment type and formality. A team jersey worn to play sport is sportswear; the same crest on a stiff dress kit is uniform. Traditional/cultural formal dress is formal. Do NOT use skin exposure to decide this."""
+
 _ACCESSORIES_DEF: Final = """accessories — for each, set class to "1" if visibly present, else "0".
 - makeup: visible cosmetics on the face (lipstick, eyeliner, eyeshadow) or painted nails.
 - tattoos: a clearly bounded ink design whose content you can NAME (letter, word, symbol, animal, figure). An unnamed dark patch, muscle shading, or anatomical line art is NOT a tattoo.
@@ -134,6 +143,7 @@ _PA_OUTPUT: Final = """Output ONLY this JSON object, nothing else (no prose, no 
   "bodydisplay": {"class": "<normal clothes|revealing clothes|partially naked|no clothes at all>", "features": ["<short visual cue>"]},
   "bodyweight":  {"class": "<light build|median|overweight|not visible>"},
   "muscle":      {"class": "<visible|not visible>"},
+  "attire":      {"class": "<underwear/swimwear|sportswear|uniform|formal|casual|not visible>"},
   "makeup":   {"class": "<0|1>"},
   "tattoos":  {"class": "<0|1>"},
   "bags":     {"class": "<0|1>"},
@@ -156,6 +166,7 @@ def build_person_attrs_prompt(include_body_shape: bool = False) -> str:
         _BODY_DISPLAY_DEF,
         _BODY_WEIGHT_DEF,
         _MUSCLE_DEF,
+        _ATTIRE_DEF,
         _ACCESSORIES_DEF,
         _PA_OUTPUT,
     ]

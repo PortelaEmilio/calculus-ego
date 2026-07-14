@@ -23,7 +23,7 @@ from importlib import import_module
 
 import config
 
-prompts_module = import_module(f"models.{getattr(config, 'VLM_PROMPT_MODULE', 'prompts_qwen3')}")
+prompts_module = import_module(f"models.{getattr(config, 'VLM_PROMPT_MODULE', 'prompts_it')}")
 
 
 VALID_ACTIVITIES = ("sports", "romance", "posing", "other")

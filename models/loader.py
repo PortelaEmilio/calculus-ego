@@ -123,7 +123,7 @@ def load_all_models():
             # {"gender":{"class":...}}; los parsers line-based esperan `Label: value`.
             # Envolvemos el backend con un proxy que aplana JSON→líneas.
             # prompts_qwen3 = variante JSON (test de joyería) → mismo proxy.
-            if getattr(_cfg, "VLM_PROMPT_MODULE", "") in ("prompts_gemma4_json", "prompts_qwen3"):
+            if getattr(_cfg, "VLM_PROMPT_MODULE", "") in ("prompts_gemma4_json", "prompts_qwen3", "prompts_qwen3_short"):
                 from models.backends.json_flatten_backend import JsonFlatteningBackend
                 backend = JsonFlatteningBackend(backend)
                 info(f"  Proxy JSON→líneas activo ({_cfg.VLM_PROMPT_MODULE})")
@@ -198,6 +198,16 @@ def load_all_models():
                 info("  Belleza inline vía base COMPARTIDO (adapter ON en generate_beauty)")
             except Exception as e:
                 warn(f"  Error al inicializar beauty compartido: {e}")
+                beauty_estimator = None
+        elif getattr(_cfg, "BEAUTY_USE_TRANSFORMERS_BACKEND", False):
+            # Backend dedicado gemma4 4-bit + LoRA (Transformers/PEFT). Independiente del
+            # backend Ollama: pensado para el PASE SEPARADO de belleza (beauty_pass.py),
+            # donde los 15 clasificadores VLM están desactivados (no caben dos modelos).
+            try:
+                from models.beauty_backend_gemma4 import Gemma4BeautyBackend
+                beauty_estimator = BeautyEstimator(backend=Gemma4BeautyBackend())
+            except Exception as e:
+                warn(f"  Error al inicializar beauty backend gemma4: {e}")
                 beauty_estimator = None
         elif needs_vlm and behaviour_classifier is not None and behaviour_classifier.backend is not None and behaviour_classifier.backend.is_loaded():
             try:

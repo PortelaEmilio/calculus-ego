@@ -135,14 +135,19 @@ def dedup_candidates(best: dict, sim_threshold: float = 0.86) -> dict:
         rep_tid, rep_cand = items[members[0]]  # mayor score (order desc)
         new_cand = dict(rep_cand)
         best_bs = rep_cand.get('body_shape')
+        best_beauty = rep_cand.get('beauty')
         merged_frames = set(frames[members[0]])
         for k in members[1:]:
             _, c = items[k]
             bs = c.get('body_shape')
             if bs and (best_bs is None or bs.get('score', 0) > best_bs.get('score', 0)):
                 best_bs = bs
+            bt = c.get('beauty')
+            if bt and (best_beauty is None or bt.get('score', 0) > best_beauty.get('score', 0)):
+                best_beauty = bt
             merged_frames |= set(c.get('frames') or ())
         new_cand['body_shape'] = best_bs
+        new_cand['beauty'] = best_beauty
         new_cand['frames'] = merged_frames
         out[rep_tid] = new_cand
     return out

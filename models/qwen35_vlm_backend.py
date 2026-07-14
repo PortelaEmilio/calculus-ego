@@ -179,6 +179,7 @@ class Qwen35VLMBackend(VLMBackend):
             out = self.model.generate(
                 **inputs, max_new_tokens=max_new_tokens, do_sample=False,
                 num_beams=1, temperature=None, top_p=None, top_k=None,
+                pad_token_id=self.processor.tokenizer.eos_token_id,
             )
         text = self.processor.tokenizer.decode(
             out[0][in_len:], skip_special_tokens=True)

@@ -678,6 +678,43 @@ def process_batch(csv_path, sample_size=400, multimedia_dir=None, output_csv=Non
                     sidecar = output_csv.with_name(output_csv.stem + "_belleza.xlsx")
                     df_beauty.to_excel(sidecar, index=False, engine="openpyxl")
                     _console.print(f"  [dim]belleza → {sidecar}")
+
+                    # Re-dibujar cada _annotated.jpg con el chip de belleza: el pase
+                    # diferido puntúa DESPUÉS de guardar las imágenes anotadas, así que
+                    # sin esto el chip no aparece. Reusa el summary + caches, sin VLM.
+                    # Solo si el detector está cargado (models=None ⇒ todo en caché ⇒
+                    # las imágenes ya vienen de un run previo).
+                    if (models and models.get('model_detect') is not None
+                            and beauty_col in df_beauty.columns
+                            and 'track_id' in df_beauty.columns):
+                        from processing.image import rerender_annotated_with_beauty
+                        redrawn = 0
+                        for img_id, grp in df_beauty.groupby('Img ID'):
+                            beauty_by_track = {
+                                r['track_id']: r[beauty_col]
+                                for _, r in grp.iterrows()
+                                if r.get('track_id') is not None
+                            }
+                            if not beauty_by_track:
+                                continue
+                            summ_path = OUTPUT_DIR / f"summary_{img_id}.json"
+                            if not summ_path.exists():
+                                continue
+                            try:
+                                with open(summ_path, 'r', encoding='utf-8') as f:
+                                    res = json.load(f).get('result')
+                                if not res or not res.get('input_path'):
+                                    continue
+                                if rerender_annotated_with_beauty(
+                                        Path(res['input_path']), OUTPUT_DIR, res,
+                                        beauty_by_track, models['model_detect'],
+                                        models['model_pose'],
+                                        social_distance_classifier=models.get('social_distance_classifier')):
+                                    redrawn += 1
+                            except Exception:
+                                continue
+                        if redrawn:
+                            _console.print(f"  [dim]↻ {redrawn} imágenes re-dibujadas con chip de belleza")
         except Exception as e:
             _console.print(f"  [yellow]pase de belleza omitido por error: {e}")
 

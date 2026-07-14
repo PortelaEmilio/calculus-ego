@@ -25,7 +25,7 @@ from importlib import import_module
 import config
 from models.accessory import ACCESSORY_CATEGORIES
 
-prompts_module = import_module(f"models.{getattr(config, 'VLM_PROMPT_MODULE', 'prompts_qwen3')}")
+prompts_module = import_module(f"models.{getattr(config, 'VLM_PROMPT_MODULE', 'prompts_it')}")
 
 
 # Categorías válidas (idénticas a las de los clasificadores individuales).
@@ -65,6 +65,34 @@ VALID_MUSCLES = (
     "not visible",
     "visible",
 )
+# Vestimenta (estilo/formalidad del atuendo). Orden por prioridad de match substring:
+# las etiquetas más largas/específicas primero para no colisionar (p.ej. "underwear/
+# swimwear" antes que cualquier "wear" suelto). "not visible" primero como en muscle.
+VALID_ATTIRE = (
+    "not visible",
+    "underwear/swimwear",
+    "sportswear",
+    "uniform",
+    "formal",
+    "casual",
+)
+# Sinónimos que el VLM suele emitir → clase canónica (se comprueban tras el closed-set).
+_ATTIRE_SYNONYMS = {
+    "swimsuit": "underwear/swimwear", "swimwear": "underwear/swimwear",
+    "bikini": "underwear/swimwear", "swim trunks": "underwear/swimwear",
+    "trunks": "underwear/swimwear", "lingerie": "underwear/swimwear",
+    "underwear": "underwear/swimwear", "bra": "underwear/swimwear",
+    "briefs": "underwear/swimwear", "boxers": "underwear/swimwear",
+    "athletic": "sportswear", "gym": "sportswear", "tracksuit": "sportswear",
+    "jersey": "sportswear", "activewear": "sportswear", "sports": "sportswear",
+    "military": "uniform", "police": "uniform", "army": "uniform",
+    "firefighter": "uniform", "medical": "uniform", "scrubs": "uniform",
+    "suit": "formal", "tuxedo": "formal", "gown": "formal", "tie": "formal",
+    "blazer": "formal", "traditional": "formal", "tunic": "formal",
+    "kimono": "formal", "sari": "formal", "kilt": "formal", "thobe": "formal",
+    "everyday": "casual", "streetwear": "casual", "street": "casual",
+    "jeans": "casual", "t-shirt": "casual", "hoodie": "casual", "normal": "casual",
+}
 
 
 # Prompts pre-compilados desde models/prompts_it.py (estilo IT sin razonamiento).
@@ -169,6 +197,23 @@ def _parse_muscle(text: str) -> str | None:
     if any(pos in raw for pos in ('visible', 'muscular', 'defined', 'toned', 'athletic', '1')):
         return 'visible'
     return None
+
+
+def _parse_attire(text: str) -> str | None:
+    """Extrae la vestimenta (estilo/formalidad) de la línea 'Attire: <...>'."""
+    match = re.search(r'^\s*Attire\s*:\s*([^\n]+)', text, re.IGNORECASE | re.MULTILINE)
+    if not match:
+        return None
+    raw = match.group(1).strip().lower()
+    if raw in ('na', 'n/a'):
+        return 'not visible'
+    # "informal" contiene "formal" → tratar antes del closed-set para no mapear a formal.
+    if 'informal' in raw:
+        return 'casual'
+    hit = next((a for a in VALID_ATTIRE if a in raw), None)
+    if hit:
+        return hit
+    return next((canon for syn, canon in _ATTIRE_SYNONYMS.items() if syn in raw), None)
 
 
 def _parse_accessories(text: str) -> dict:
@@ -407,10 +452,11 @@ class PersonAttributesClassifier:
 
     @staticmethod
     def _build_body_shape_result(text: str) -> dict:
-        # Silueta eliminada 2026-07-04: este slot lleva SOLO peso + musculatura.
+        # Silueta eliminada 2026-07-04: este slot lleva peso + musculatura + vestimenta.
         return {
             "body_weight": _parse_body_weight(text) or "not visible",
             "muscle": _parse_muscle(text) or "not visible",
+            "attire": _parse_attire(text) or "not visible",
             "raw_response": text,
             "success": True,
         }

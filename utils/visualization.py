@@ -419,63 +419,109 @@ def get_face_keypoint_centroid(keypoints: np.ndarray, min_conf: float = 0.3):
             float(np.mean([p[1] for p in valid_pts])))
 
 
+def _valid_face_keypoints(keypoints: np.ndarray, min_conf: float) -> dict:
+    """Keypoints faciales COCO válidos (conf > min_conf) indexados por su índice:
+    nose(0), left_eye(1), right_eye(2), left_ear(3), right_ear(4)."""
+    valid = {}
+    for idx in (0, 1, 2, 3, 4):
+        if idx < len(keypoints):
+            x, y, conf = keypoints[idx]
+            if conf > min_conf:
+                valid[idx] = (float(x), float(y))
+    return valid
+
+
+def face_tight_px(keypoints: np.ndarray, min_conf: float = 0.5) -> int | None:
+    """Métrica face_px HISTÓRICA: mín(alto, ancho) de la caja apretada de keypoints
+    faciales + 30% de margen (= dimensiones del crop-tira previo al fix de geometría
+    2026-07-10). Se conserva como proxy del tamaño real de la cara para que la
+    calibración de low_res (LOW_RES_PX≈120) siga valiendo aunque el crop enviado al
+    estimador sea ahora cabeza completa."""
+    valid = _valid_face_keypoints(keypoints, min_conf)
+    if len(valid) < 3:
+        return None
+    xs = [p[0] for p in valid.values()]
+    ys = [p[1] for p in valid.values()]
+    h = (max(ys) - min(ys)) * 1.6
+    w = (max(xs) - min(xs)) * 1.6
+    if h <= 0 or w <= 0:
+        return None
+    return int(min(h, w))
+
+
 def extract_face_crop(frame: np.ndarray, keypoints: np.ndarray, bbox: tuple,
                       margin_percent: float = 0.3, min_conf: float = 0.5,
                       min_points: int = 5) -> np.ndarray | None:
     """
-    Extrae el crop de la cara desde el frame usando los keypoints faciales.
+    Extrae el crop de la CABEZA COMPLETA desde el frame usando los keypoints faciales.
+
+    ⚠️ Geometría corregida el 2026-07-10: la versión anterior devolvía la caja min/max
+    de los 5 keypoints + 30% — pero esa caja solo abarca ojos→nariz en vertical (las
+    orejas están a la altura de los ojos), así que el crop era una TIRA sin frente,
+    boca ni mentón, fuera de la distribución de entrenamiento del estimador de belleza
+    (retratos cabeza+hombros SCUT/CFD/MEBeauty) → anclaba las notas a ~2-3. Ahora se
+    expande asimétricamente en función del ANCHO de cara a cabeza completa (verificado:
+    la misma cara pasó de 2.3 a 8.1 con el mismo modelo).
 
     Args:
         frame: Frame completo BGR de OpenCV
         keypoints: Array de keypoints [num_keypoints, 3] donde 3 = (x, y, conf)
-        bbox: Tupla (x1, y1, x2, y2) del bounding box de la persona completa
-        margin_percent: Margen adicional alrededor de la cara (porcentaje de tamaño)
+        bbox: Tupla (x1, y1, x2, y2) del bounding box de la persona (mismas coordenadas
+            que los keypoints); el crop se recorta a este bbox expandido 10% para no
+            invadir caras vecinas en multitudes. None → sin ese clamp.
+        margin_percent: IGNORADO (legacy, se mantiene por compatibilidad de firma)
         min_conf: Confianza mínima para considerar un keypoint válido
         min_points: Nº mínimo de keypoints faciales válidos para extraer el crop
             (default 5 = cara completa; el path de belleza de vídeo lo baja para
             priorizar el frame con MÁS keypoints faciales aunque no estén los 5)
 
     Returns:
-        Crop de la cara o None si no se puede extraer
+        Crop de la cabeza o None si no se puede extraer
     """
     if len(keypoints) < 5:
         return None
 
-    # Keypoints faciales: nose(0), left_eye(1), right_eye(2), left_ear(3), right_ear(4)
-    face_keypoint_indices = [0, 1, 2, 3, 4]
-
-    # Extraer keypoints faciales válidos
-    valid_face_points = []
-    for idx in face_keypoint_indices:
-        if idx < len(keypoints):
-            x, y, conf = keypoints[idx]
-            if conf > min_conf:
-                valid_face_points.append((x, y))
+    valid = _valid_face_keypoints(keypoints, min_conf)
 
     # Necesitamos al menos `min_points` puntos faciales para el crop de belleza
-    if len(valid_face_points) < min_points:
+    if len(valid) < min_points:
         return None
 
-    # Calcular bounding box de la cara
-    xs = [p[0] for p in valid_face_points]
-    ys = [p[1] for p in valid_face_points]
+    # Caja apretada de los keypoints faciales
+    xs = [p[0] for p in valid.values()]
+    ys = [p[1] for p in valid.values()]
+    kx1, ky1 = min(xs), min(ys)
+    kx2, ky2 = max(xs), max(ys)
 
-    face_x1 = int(min(xs))
-    face_y1 = int(min(ys))
-    face_x2 = int(max(xs))
-    face_y2 = int(max(ys))
+    # Ancho efectivo de cara: con los 5 kpts la caja es ~oreja-a-oreja. Si faltan las
+    # orejas (min_points bajado en vídeo) la caja se estrecha a la distancia
+    # inter-ocular → floor de 2.2×IOD como ancho real de cabeza.
+    w_eff = kx2 - kx1
+    if 1 in valid and 2 in valid:
+        iod = float(np.hypot(valid[1][0] - valid[2][0], valid[1][1] - valid[2][1]))
+        w_eff = max(w_eff, 2.2 * iod)
+    if w_eff <= 0:
+        return None
 
-    # Añadir margen
-    face_width = face_x2 - face_x1
-    face_height = face_y2 - face_y1
+    # Expansión asimétrica a cabeza completa (la caja de kpts solo cubre ojos→nariz)
+    face_x1 = kx1 - 0.25 * w_eff
+    face_x2 = kx2 + 0.25 * w_eff
+    face_y1 = ky1 - 0.8 * w_eff    # frente + pelo
+    face_y2 = ky2 + 1.0 * w_eff    # boca + mentón
 
-    margin_x = int(face_width * margin_percent)
-    margin_y = int(face_height * margin_percent)
+    # Clamp al bbox de persona expandido 10% (guard multitudes) y al frame
+    if bbox is not None:
+        bx1, by1, bx2, by2 = [float(v) for v in bbox]
+        mx, my = 0.10 * (bx2 - bx1), 0.10 * (by2 - by1)
+        face_x1 = max(face_x1, bx1 - mx)
+        face_y1 = max(face_y1, by1 - my)
+        face_x2 = min(face_x2, bx2 + mx)
+        face_y2 = min(face_y2, by2 + my)
 
-    face_x1 = max(0, face_x1 - margin_x)
-    face_y1 = max(0, face_y1 - margin_y)
-    face_x2 = min(frame.shape[1], face_x2 + margin_x)
-    face_y2 = min(frame.shape[0], face_y2 + margin_y)
+    face_x1 = max(0, int(face_x1))
+    face_y1 = max(0, int(face_y1))
+    face_x2 = min(frame.shape[1], int(face_x2))
+    face_y2 = min(frame.shape[0], int(face_y2))
 
     # Verificar que el crop sea válido
     if face_x2 <= face_x1 or face_y2 <= face_y1:
@@ -612,6 +658,10 @@ _SILHOUETTE_LABELS = {
     "pear": "Pear", "hourglass": "Hourglass", "triangle": "Triangle",
 }
 _WEIGHT_LABELS = {"thin": "Thin", "median": "Median", "overweight": "Overweight"}
+_ATTIRE_LABELS = {
+    "underwear/swimwear": "Underwear/Swim", "sportswear": "Sportswear",
+    "uniform": "Uniform", "formal": "Formal", "casual": "Casual",
+}
 _SOCIAL_DISTANCE_LABELS = {
     "intimate distance": "Intimate", "close personal distance": "Close personal",
     "far personal distance": "Far personal", "close social distance": "Close social",
@@ -688,6 +738,9 @@ def build_person_display_attrs(gender_info=None, age_info=None, behaviour_info=N
         muscle = body_shape_info.get("muscle")
         if not _blank(muscle) and muscle.strip().lower() == "visible":
             attrs.append(("muscle", "Muscular"))
+        attire = body_shape_info.get("attire")
+        if not _blank(attire):
+            attrs.append(("attire", _label(_ATTIRE_LABELS, attire)))
         # silueta ELIMINADA 2026-07-04
 
     if social_distance_info and social_distance_info.get("success") and ENABLE_SOCIAL_DISTANCE:

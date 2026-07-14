@@ -29,6 +29,10 @@ ENABLE_BEAUTY_ESTIMATION = True     # Belleza INLINE (chips de vídeo), ACTIVA p
 #   usa el base COMPARTIDO Qwen3.5-9B vía generate_beauty() sin cargar 2º modelo. Nota: en el path de
 #   IMAGEN esto corre belleza inline para TODAS las personas, además del pase diferido demand/*
 #   (ENABLE_BEAUTY_PASS) → cómputo duplicado en imágenes; ponerla en False si se procesa un lote de imágenes.
+ENABLE_BEAUTY_INLINE_IMAGES = False # 2026-07-07: la inline queda SOLO para vídeo (chips). En IMÁGENES la
+#   belleza la da únicamente el pase DIFERIDO (crop de cara, 5 keypoints faciales, LoRA checkpoint-1400,
+#   solo demand/*) → elimina la doble puntuación por imagen. True = comportamiento previo (inline también
+#   en imágenes, además del pase).
 BEAUTY_MIN_FACE_KEYPOINTS = 3       # Belleza en vídeo: mín. keypoints faciales visibles (de 5) para
 #   puntuar una cara; se elige por escena el frame con MÁS keypoints faciales y, a igualdad, el MÁS NÍTIDO.
 # Selección del frame de belleza por escena: frontalidad (nº de keypoints faciales) PRIMARIA, nitidez
@@ -78,6 +82,20 @@ USE_FINETUNED_MODEL = False         # Usar modelo Qwen finetuneado con adaptador
 
 # ⚙️ USAR FUENTE LIBERATION SANS
 USE_LIBERATION_SANS = True          # Usar fuente TrueType (PIL) para el texto en visualizaciones (requiere PIL/Pillow)
+
+# ⚙️ SALIDAS ANOTADAS A DISCO (imágenes)
+SAVE_ANNOTATED_OUTPUTS = True       # Escribir {stem}_annotated.jpg + person_crops/ + person_crops_annotated/.
+                                    #   El modo `carpeta` lo fuerza a False (no persiste imágenes: escribirlas
+                                    #   y borrarlas era trabajo perdido). No afecta a la clasificación ni al
+                                    #   pase de belleza (re-lee la imagen ORIGINAL, no los crops).
+
+# ⚙️ VÍDEOS LARGOS AL FINAL (modo `carpeta`)
+CARPETA_LONG_VIDEO_THRESHOLD_S = 60  # Vídeos con duración ≥ este umbral (s) se procesan AL FINAL,
+                                     #   ordenados de menor a mayor duración (el peor queda el último).
+                                     #   Examen 2026-07-11 (36.353 mp4): mediana 21s, p95 104s, máx 106min;
+                                     #   ≥60s = 17,6% de los vídeos pero 54,2% del tiempo total. Duraciones
+                                     #   desde validacion_imagenes/duraciones_videos.csv (caché; lo que falte
+                                     #   se sondea con cv2, solo cabecera). 0/None = desactivado (orden actual).
 
 # ⚙️ IMAGEN ANOTADA POR PERSONA
 ENABLE_PER_PERSON_ANNOTATED_IMAGE = True  # Guardar un recorte anotado por cada persona detectada
@@ -383,9 +401,12 @@ VLM_ENABLE_THINKING = False   # PROD 2026-06-29: prompts_gemma4_json son "no-rea
 # Módulo de prompts a importar (los 3 classifiers Merge A / Merge B / social
 # distance hacen `importlib.import_module(f"models.{config.VLM_PROMPT_MODULE}")`)
 # ============================================================================
-#   "prompts_qwen3" → prompts JSON no-reasoning para Qwen3.5-9B (behaviour → gate
-#                     de pose, sports por acción). Requiere el proxy JsonFlatteningBackend.
-VLM_PROMPT_MODULE = _os_pm.environ.get("VLM_PROMPT_MODULE") or "prompts_qwen3"
+#   "prompts_it"            → prompts adaptados a IT sin CoT
+#   "prompts_ollama_cot"    → prompts CoT del baseline gemma4 (E4B+thinking)
+#   "prompts_ollama_qwen35" → prompts para Qwen3.5-9B (thinking nativo)
+#   "prompts_gemma4_json"   → prompts JSON refinados no-reasoning (PRODUCCIÓN 2026-06-29)
+import os as _os_pm   # override por entorno para experimentos (p.ej. prompts_qwen3)
+VLM_PROMPT_MODULE = _os_pm.environ.get("VLM_PROMPT_MODULE") or "prompts_qwen3"   # PROD 2026-07-02 (Qwen3.5): fork de prompts_gemma4_json con submission→gate + sports-por-acción; requiere el proxy JsonFlatteningBackend (loader). Rollback: "prompts_gemma4_json" / "prompts_ollama_cot"
 
 # ============================================================================
 # Transformers (Gemma-4 NF4): presupuesto de tokens de imagen y gate de pose
@@ -603,6 +624,7 @@ CATEGORY_COLORS = {
     "body_weight":     ( 60, 146, 251),   # naranja
     "muscle":          (113, 113, 248),   # rojo
     "silhouette":      (248, 140, 129),   # índigo
+    "attire":          (140, 180, 248),   # salmón claro
     "social_distance": (238, 211,  34),   # cian
     "beauty":          (175, 164, 253),   # rosa palo
     "accessory":       ( 53, 230, 163),   # lima

@@ -21,6 +21,7 @@ _KEY2LABEL = {
     "gender": "Gender", "age": "Age", "behaviour": "Behaviour",
     "bodydisplay": "BodyDisplay", "bodyweight": "BodyWeight",
     "muscle": "Musculature",  # silueta ELIMINADA 2026-07-04 (peso/musculatura se conservan)
+    "attire": "Attire",  # vestimenta (estilo/formalidad) añadida 2026-07-08
     "makeup": "makeup", "tattoos": "tattoos", "bags": "bags", "belts": "belts",
     "jewelry": "jewelry", "headwear": "headwear", "eyewear": "eyewear",
     "activity": "Activity", "location": "location", "socialdistance": "social distance",
@@ -36,13 +37,20 @@ _CLASS_RE = {
     for key in _KEY2LABEL
 }
 
+# Formato PLANO (prompts_qwen3_short): `"key": "value"` sin envoltorio {"class": ...}.
+_FLAT_RE = {
+    key: re.compile(r'"' + re.escape(key) + r'"\s*:\s*"([^"]*)"')
+    for key in _KEY2LABEL
+}
+
 
 def _flatten_by_regex(raw: str):
     """Extrae pares class por regex (tolerante a JSON truncado/incompleto). Devuelve
-    lista de líneas `Label: value`, o [] si no encuentra ninguna."""
+    lista de líneas `Label: value`, o [] si no encuentra ninguna. Prueba primero el
+    formato {"class": ...} de producción y luego el plano (prompts_qwen3_short)."""
     lines = []
     for key, label in _KEY2LABEL.items():
-        m = _CLASS_RE[key].search(raw)
+        m = _CLASS_RE[key].search(raw) or _FLAT_RE[key].search(raw)
         if m:
             lines.append(f"{label}: {m.group(1)}")
     return lines

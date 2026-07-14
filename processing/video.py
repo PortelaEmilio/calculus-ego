@@ -628,6 +628,7 @@ def update_scene_best_candidates(best_candidates: dict, frame, results_detect, r
                     'score': general_score,
                     'frame_local_idx': local_idx,
                     'bbox': (x1, y1, x2, y2),
+                    'kpts': keypoints_list[person_idx] if person_idx < len(keypoints_list) else None,
                 }
 
         if ENABLE_BEAUTY_ESTIMATION and person_idx < len(keypoints_list):
@@ -696,6 +697,7 @@ def prescan_scene_for_best_frames(scene_frames_data: list, scene_num: int) -> di
                         'score': general_score,
                         'frame_local_idx': local_idx,
                         'bbox': (x1, y1, x2, y2),
+                        'kpts': keypoints_list[person_idx] if person_idx < len(keypoints_list) else None,
                     }
 
             if ENABLE_BEAUTY_ESTIMATION and person_idx < len(keypoints_list):
@@ -810,6 +812,9 @@ def analyze_scene_vlm(best_candidates: dict, first_frame, scene_num: int,
                 entry = body_shape_cache.setdefault(track_id, {})
                 entry['body_weight'] = result.get('body_weight')
                 entry['muscle'] = result.get('muscle')
+                # Vestimenta: el VLM decide directamente (gate de hombros ELIMINADO
+                # 2026-07-08 — ver image.py / CLAUDE.md).
+                entry['attire'] = result.get('attire')
 
         for track_id, result in zip(general_track_ids, merged_behaviour):
             if ENABLE_BEHAVIOUR_CLASSIFICATION and result and result.get('success'):
@@ -1142,6 +1147,7 @@ def _dump_scene_validation(validation_scenes, video_stem, output_dir,
             'location':          _get('location', track_id, 'location'),
             'weight':            _get('body_shape', track_id, 'body_weight'),
             'muscle':            _get('body_shape', track_id, 'muscle'),
+            'attire':            _get('body_shape', track_id, 'attire'),
             'accessories':       accessories,
             'beauty':            _get('beauty', track_id, 'score'),
             'social_distance':      None,   # rellenado post-bucle por (track_id, frame∈escena)
@@ -1154,6 +1160,65 @@ def _dump_scene_validation(validation_scenes, video_stem, output_dir,
         'frame_path': frame_path,
         'persons': persons,
     })
+
+
+def _collect_beauty_pending(pending: list, best_candidates: dict, caches: dict,
+                            scene_label, scene_start_frame: int):
+    """Recoge, tras clasificar una (sub)escena, los crops de cara de las personas
+    **demand/*** para el pase de belleza DIFERIDO del vídeo (2026-07-10: la belleza
+    de vídeo ya no se puntúa inline en `analyze_scene_vlm`; se puntúa al final del
+    vídeo, antes de la fase de anotación, con el mismo gating demand/* que las
+    imágenes). Guarda una referencia al `beauty_cache` de la escena para inyectar
+    el score después (el chip se dibuja desde ese caché en la anotación)."""
+    for track_id, cand in best_candidates.items():
+        beauty = cand.get('beauty')
+        if not beauty or beauty.get('face_crop') is None:
+            continue
+        beh_entry = caches.get('behaviour', {}).get(track_id)
+        beh = beh_entry.get('behaviour') if isinstance(beh_entry, dict) else None
+        if not (isinstance(beh, str) and beh.startswith('demand')):
+            continue
+        pending.append({
+            'scene_label': scene_label,
+            'track_id': track_id,
+            'frame': scene_start_frame + beauty.get('frame_local_idx', 0),
+            'face_crop': beauty['face_crop'],
+            'beauty_cache': caches['beauty'],
+        })
+
+
+def _score_beauty_pending(pending: list, beauty_estimator) -> list:
+    """FASE DIFERIDA de belleza del vídeo: puntúa los crops demand/* recogidos
+    durante la clasificación e inyecta el score en el `beauty_cache` de su
+    (sub)escena — la fase de anotación posterior dibuja el chip desde ahí.
+    Devuelve la lista de clasificaciones [{track_id, scene, frame, score, …}].
+    Degrada con elegancia: sin estimador / sin pendientes → lista vacía."""
+    out = []
+    if not pending or beauty_estimator is None:
+        return out
+    from ui import info
+    info(f"  Belleza diferida (demand/*): {len(pending)} rostro(s)…")
+    for p in pending:
+        try:
+            result = beauty_estimator.estimate(p['face_crop'])
+        except Exception:
+            result = None
+        if result and result.get('success'):
+            p['beauty_cache'][p['track_id']] = {
+                'score': result.get('score'),
+                'last_frame': p['frame'],
+                'raw_response': result.get('raw_response'),
+            }
+            out.append({
+                'track_id': p['track_id'],
+                'scene': str(p['scene_label']),
+                'frame': p['frame'],
+                'score': result.get('score'),
+                'raw_response': result.get('raw_response'),
+            })
+        else:
+            p['beauty_cache'][p['track_id']] = {'score': None, 'not_calculable': True}
+    return out
 
 
 def process_video(video_path: Path, model_detect, model_pose,
@@ -1202,6 +1267,15 @@ def process_video(video_path: Path, model_detect, model_pose,
     all_accessory_classifications = []
     all_social_distance_classifications = []
     validation_scenes = []  # solo se rellena si validation_dump=True
+
+    # Belleza DIFERIDA (2026-07-10): la clasificación ya no puntúa belleza inline.
+    # Se recogen los crops demand/* por (sub)escena y se puntúan al final, ANTES de
+    # la fase de anotación (así el chip sale en el mp4 sin re-encodear).
+    beauty_pending = []
+    # Trabajos de render: la anotación se difiere al final (tras la belleza). Cada
+    # entrada guarda la metadata YOLO por frame (orig_img=None) y los caches por
+    # sub-escena de UNA escena; los frames se re-leen por seek en la fase de render.
+    render_jobs = []
 
     scene_change_frames = detect_scene_changes(video_path)
     if not scene_change_frames:
@@ -1351,13 +1425,17 @@ def process_video(video_path: Path, model_detect, model_pose,
                         body_shape_classifier=body_shape_classifier if ENABLE_BODY_SHAPE_CLASSIFICATION else None,
                         accessory_classifier=accessory_classifier if ENABLE_ACCESSORY_CLASSIFICATION else None,
                         ocr_classifier=ocr_classifier,
-                        beauty_estimator=beauty_estimator if ENABLE_BEAUTY_ESTIMATION else None,
+                        beauty_estimator=None,  # belleza DIFERIDA (demand/*), ver _score_beauty_pending
                         gender_classifier=gender_classifier if ENABLE_GENDER_CLASSIFICATION else None,
                         age_classifier=age_classifier if ENABLE_AGE_CLASSIFICATION else None,
                         person_attributes_classifier=person_attributes_classifier,
                         scene_context_classifier=scene_context_classifier,
                     )
                     sub_caches_list.append(sub_caches)
+
+                    if ENABLE_BEAUTY_ESTIMATION:
+                        _collect_beauty_pending(beauty_pending, sub_best, sub_caches,
+                                                sub_scene_label, sub_start_global)
 
                     if validation_dump:
                         _dump_scene_validation(
@@ -1386,77 +1464,18 @@ def process_video(video_path: Path, model_detect, model_pose,
                     all_gender_classifications.extend(sub_vlm_classifications['gender'])
                     all_age_classifications.extend(sub_vlm_classifications['age'])
 
-                # FASE 3-S: ANOTACIÓN — Seek-back final
-                cap.set(cv2.CAP_PROP_POS_FRAMES, scene_start)
+                # ANOTACIÓN DIFERIDA: se registra el trabajo de render (la anotación
+                # corre al final del vídeo, tras el pase de belleza, re-leyendo los
+                # frames por seek). scene_metadata ya tiene orig_img=None (ligero).
+                render_jobs.append({
+                    'scene_start': scene_start,
+                    'n_frames': frames_read,
+                    'metadata': scene_metadata,
+                    'sub_boundaries': sub_boundaries_s,
+                    'sub_caches_list': sub_caches_list,
+                    'sub_labels': sub_scene_labels,
+                })
 
-                info(f"  [dim]Escena {scene_num}: seek-back ({frames_read} frames)")
-
-                for local_idx in range(frames_read):
-                    ret, frame = cap.read()
-                    if not ret:
-                        break
-
-                    results_detect, results_pose, keypoints_list = scene_metadata[local_idx]
-                    global_frame_idx = scene_start + local_idx
-
-                    sub_idx_for_frame = 0
-                    for si in range(len(sub_boundaries_s) - 1):
-                        if sub_boundaries_s[si] <= local_idx < sub_boundaries_s[si + 1]:
-                            sub_idx_for_frame = si
-                            break
-                    active_caches = sub_caches_list[sub_idx_for_frame]
-                    active_scene_label = sub_scene_labels[sub_idx_for_frame]
-                    fade_alpha = _fade_alpha_for(
-                        local_idx - sub_boundaries_s[sub_idx_for_frame], fps)
-
-                    annotated, stats, *_ = annotate_frame(
-                        frame, results_detect, results_pose,
-                        with_tracking=ENABLE_TRACKING,
-                        beauty_estimator=None,
-                        gender_classifier=None,
-                        age_classifier=None,
-                        behaviour_classifier=None,
-                        activity_classifier=None,
-                        body_display_classifier=None,
-                        location_classifier=None,
-                        body_shape_classifier=None,
-                        accessory_classifier=None,
-                        social_distance_classifier=social_distance_classifier if ENABLE_SOCIAL_DISTANCE else None,
-                        frame_idx=global_frame_idx,
-                        output_dir=output_dir,
-                        behaviour_cache=active_caches['behaviour'],
-                        activity_cache=active_caches['activity'],
-                        body_display_cache=active_caches['body_display'],
-                        location_cache=active_caches['location'],
-                        body_shape_cache=active_caches['body_shape'],
-                        accessory_cache=active_caches['accessory'],
-                        beauty_cache=active_caches['beauty'],
-                        gender_cache=active_caches['gender'],
-                        age_cache=active_caches['age'],
-                        scene_number=active_scene_label,
-                        total_scenes=total_scenes_count,
-                        fade_alpha=fade_alpha,
-                    )
-
-                    out.write(annotated)
-
-                    if ENABLE_TRACKING:
-                        for tid in stats['track_ids']:
-                            unique_tracks.add(tid)
-                            track_history[tid] += 1
-
-                    frame_detections.append({
-                        "frame": global_frame_idx,
-                        "persons": stats['num_persons'],
-                        "persons_yolo": stats.get('num_persons_yolo', stats['num_persons'])
-                    })
-
-                    all_beauty_scores.extend(stats['beauty_scores'])
-                    all_social_distance_classifications.extend(stats['social_distance_classifications'])
-
-                    del frame, annotated
-
-                del scene_metadata, sub_caches_list
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -1523,8 +1542,14 @@ def process_video(video_path: Path, model_detect, model_pose,
                 if len(sub_scenes_list) > 1:
                     info(f"  [dim]Escena {scene_num} → {len(sub_scenes_list)} sub-escena(s) por keypoints")
 
+                sub_caches_list_b = []
+                sub_labels_b = []
+
                 for sub_idx, sub_frames in enumerate(sub_scenes_list):
                     if not sub_frames:
+                        # mantener el alineamiento sub_boundaries ↔ caches en el render
+                        sub_caches_list_b.append(None)
+                        sub_labels_b.append(scene_num)
                         continue
 
                     sub_scene_label = (f"{scene_num}.{sub_idx + 1}"
@@ -1548,12 +1573,19 @@ def process_video(video_path: Path, model_detect, model_pose,
                         body_shape_classifier=body_shape_classifier if ENABLE_BODY_SHAPE_CLASSIFICATION else None,
                         accessory_classifier=accessory_classifier if ENABLE_ACCESSORY_CLASSIFICATION else None,
                         ocr_classifier=ocr_classifier,
-                        beauty_estimator=beauty_estimator if ENABLE_BEAUTY_ESTIMATION else None,
+                        beauty_estimator=None,  # belleza DIFERIDA (demand/*), ver _score_beauty_pending
                         gender_classifier=gender_classifier if ENABLE_GENDER_CLASSIFICATION else None,
                         age_classifier=age_classifier if ENABLE_AGE_CLASSIFICATION else None,
                         person_attributes_classifier=person_attributes_classifier,
                         scene_context_classifier=scene_context_classifier,
                     )
+
+                    sub_caches_list_b.append(caches)
+                    sub_labels_b.append(sub_scene_label)
+
+                    if ENABLE_BEAUTY_ESTIMATION:
+                        _collect_beauty_pending(beauty_pending, sub_best, caches,
+                                                sub_scene_label, sub_start_global)
 
                     if ocr_result and ocr_result.get("success"):
                         ocr_results_by_scene[sub_scene_label] = {
@@ -1580,57 +1612,134 @@ def process_video(video_path: Path, model_detect, model_pose,
                             sub_best, caches, first_frame_sub,
                         )
 
-                    for local_idx_sub, (frame, results_detect, results_pose, keypoints_list) in enumerate(sub_frames):
-                        global_frame_idx = sub_start_global + local_idx_sub
-                        fade_alpha = _fade_alpha_for(local_idx_sub, fps)
+                # ANOTACIÓN DIFERIDA: registrar el trabajo de render y liberar los
+                # frames (la metadata YOLO se conserva ligera con orig_img=None; los
+                # frames se re-leen por seek en la fase de render).
+                scene_metadata_b = []
+                for (frame_b, results_detect, results_pose, keypoints_list) in scene_frames:
+                    results_detect[0].orig_img = None
+                    results_pose[0].orig_img = None
+                    scene_metadata_b.append((results_detect, results_pose, keypoints_list))
 
-                        annotated, stats, *_ = annotate_frame(
-                            frame.copy(), results_detect, results_pose,
-                            with_tracking=ENABLE_TRACKING,
-                            beauty_estimator=None,
-                            gender_classifier=None,
-                            age_classifier=None,
-                            behaviour_classifier=None,
-                            activity_classifier=None,
-                            body_display_classifier=None,
-                            location_classifier=None,
-                            body_shape_classifier=None,
-                            accessory_classifier=None,
-                            social_distance_classifier=social_distance_classifier if ENABLE_SOCIAL_DISTANCE else None,
-                            frame_idx=global_frame_idx,
-                            output_dir=output_dir,
-                            behaviour_cache=caches['behaviour'],
-                            activity_cache=caches['activity'],
-                            body_display_cache=caches['body_display'],
-                            location_cache=caches['location'],
-                            body_shape_cache=caches['body_shape'],
-                            accessory_cache=caches['accessory'],
-                            beauty_cache=caches['beauty'],
-                            gender_cache=caches['gender'],
-                            age_cache=caches['age'],
-                            scene_number=sub_scene_label,
-                            total_scenes=total_scenes_count,
-                            fade_alpha=fade_alpha,
-                        )
-
-                        out.write(annotated)
-
-                        if ENABLE_TRACKING:
-                            for tid in stats['track_ids']:
-                                unique_tracks.add(tid)
-                                track_history[tid] += 1
-
-                        frame_detections.append({
-                            "frame": global_frame_idx,
-                            "persons": stats['num_persons'],
-                            "persons_yolo": stats.get('num_persons_yolo', stats['num_persons'])
-                        })
-
-                        all_beauty_scores.extend(stats['beauty_scores'])
-                        all_social_distance_classifications.extend(stats['social_distance_classifications'])
+                render_jobs.append({
+                    'scene_start': scene_start,
+                    'n_frames': len(scene_frames),
+                    'metadata': scene_metadata_b,
+                    'sub_boundaries': sub_boundaries,
+                    'sub_caches_list': sub_caches_list_b,
+                    'sub_labels': sub_labels_b,
+                })
 
                 del scene_frames
                 frame_idx = scene_start + scene_frame_count
+
+    # ========================================================================
+    # FASE DIFERIDA DE BELLEZA (solo demand/*, 2026-07-10) — se puntúa al final
+    # de la clasificación, ANTES de la anotación, para que el chip 'Beauty X.X'
+    # salga en el mp4 en una sola pasada de encode. Gating idéntico a imágenes.
+    # ========================================================================
+    import config as _config
+    beauty_classifications = []
+    if (beauty_pending and beauty_estimator is not None
+            and getattr(_config, "ENABLE_BEAUTY_PASS", True)):
+        beauty_classifications = _score_beauty_pending(beauty_pending, beauty_estimator)
+    beauty_pending = None
+
+    # Reflejar los scores diferidos en las escenas de validación (se volcaron con
+    # beauty=None porque el dump ocurre durante la clasificación).
+    if validation_dump and validation_scenes and beauty_classifications:
+        _smap = {(c['scene'], c['track_id']): c['score'] for c in beauty_classifications}
+        for _scene in validation_scenes:
+            for _person in _scene['persons']:
+                _key = (str(_scene['scene_label']), _person['track_id'])
+                if _key in _smap:
+                    _person['beauty'] = _smap[_key]
+
+    # ========================================================================
+    # FASE DE ANOTACIÓN (diferida): re-lectura de frames por seek + render con
+    # los caches por (sub)escena (belleza ya inyectada). Sin llamadas VLM.
+    # ========================================================================
+    _empty_caches = {k: {} for k in ('behaviour', 'activity', 'body_display',
+                                     'location', 'body_shape', 'accessory',
+                                     'beauty', 'gender', 'age')}
+    total_render_frames = sum(j['n_frames'] for j in render_jobs)
+    with tqdm(total=total_render_frames, desc="  Anotando", unit="frame") as pbar:
+        for job in render_jobs:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, job['scene_start'])
+            sb = job['sub_boundaries']
+
+            for local_idx in range(job['n_frames']):
+                ret, frame = cap.read()
+                if not ret:
+                    break
+
+                results_detect, results_pose, keypoints_list = job['metadata'][local_idx]
+                global_frame_idx = job['scene_start'] + local_idx
+
+                sub_idx_for_frame = 0
+                for si in range(len(sb) - 1):
+                    if sb[si] <= local_idx < sb[si + 1]:
+                        sub_idx_for_frame = si
+                        break
+                active_caches = job['sub_caches_list'][sub_idx_for_frame] or _empty_caches
+                active_scene_label = job['sub_labels'][sub_idx_for_frame]
+                fade_alpha = _fade_alpha_for(
+                    local_idx - sb[sub_idx_for_frame], fps)
+
+                annotated, stats, *_ = annotate_frame(
+                    frame, results_detect, results_pose,
+                    with_tracking=ENABLE_TRACKING,
+                    beauty_estimator=None,
+                    gender_classifier=None,
+                    age_classifier=None,
+                    behaviour_classifier=None,
+                    activity_classifier=None,
+                    body_display_classifier=None,
+                    location_classifier=None,
+                    body_shape_classifier=None,
+                    accessory_classifier=None,
+                    social_distance_classifier=social_distance_classifier if ENABLE_SOCIAL_DISTANCE else None,
+                    frame_idx=global_frame_idx,
+                    output_dir=output_dir,
+                    behaviour_cache=active_caches['behaviour'],
+                    activity_cache=active_caches['activity'],
+                    body_display_cache=active_caches['body_display'],
+                    location_cache=active_caches['location'],
+                    body_shape_cache=active_caches['body_shape'],
+                    accessory_cache=active_caches['accessory'],
+                    beauty_cache=active_caches['beauty'],
+                    gender_cache=active_caches['gender'],
+                    age_cache=active_caches['age'],
+                    scene_number=active_scene_label,
+                    total_scenes=len(scenes),
+                    fade_alpha=fade_alpha,
+                )
+
+                out.write(annotated)
+
+                if ENABLE_TRACKING:
+                    for tid in stats['track_ids']:
+                        unique_tracks.add(tid)
+                        track_history[tid] += 1
+
+                frame_detections.append({
+                    "frame": global_frame_idx,
+                    "persons": stats['num_persons'],
+                    "persons_yolo": stats.get('num_persons_yolo', stats['num_persons'])
+                })
+
+                all_beauty_scores.extend(stats['beauty_scores'])
+                all_social_distance_classifications.extend(stats['social_distance_classifications'])
+
+                del frame, annotated
+                pbar.update(1)
+
+            job['metadata'] = None
+            gc.collect()
+
+    render_jobs = None
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     cap.release()
     out.release()
@@ -1720,6 +1829,9 @@ def process_video(video_path: Path, model_detect, model_pose,
         "max_persons_per_frame": max_persons,
         "beauty_scores": all_beauty_scores,
         "beauty_statistics": beauty_stats,
+        # Pase DIFERIDO de belleza (demand/*, 2026-07-10): una entrada por
+        # (sub)escena × persona demand puntuada.
+        "beauty_classifications": beauty_classifications,
         "gender_classifications": all_gender_classifications,
         "gender_statistics": gender_stats,
         "age_classifications": all_age_classifications,
