@@ -1659,15 +1659,15 @@ def main():
         _render_result_summary(result, file_ext, image_extensions)
 
         if file_ext in image_extensions:
-            # Pase de belleza diferido de IMAGEN (solo demand/*). Lee el summary
-            # recién escrito (filtrado a este stem) y puntúa los rostros demand/*.
-            # Degrada con elegancia.
+            # Pase de belleza diferido de IMAGEN (2026-07-21: ≥4 keypoints, sin gating
+            # demand/*). Lee el summary recién escrito (filtrado a este stem) y puntúa
+            # toda cara con keypoints/tamaño suficientes. Degrada con elegancia.
             from processing.beauty_phase import run_beauty_phase, shared_beauty_backend_from_models
             df_beauty, beauty_col = run_beauty_phase(
                 OUTPUT_DIR, model_pose, only_stem=input_path.stem,
                 shared_backend=shared_beauty_backend_from_models(models))
             if df_beauty is not None and not df_beauty.empty and beauty_col in df_beauty.columns:
-                kv_table("Belleza (demand/*)", [
+                kv_table("Belleza (≥4 kpts)", [
                     (f"persona {r.get('track_id') or r['person_idx']}", str(r[beauty_col]))
                     for _, r in df_beauty.iterrows()
                 ])
@@ -1687,13 +1687,13 @@ def main():
                         social_distance_classifier=social_distance_classifier):
                     info("  ↻ imagen anotada re-dibujada con chip de belleza")
         else:
-            # VÍDEO (2026-07-10): la belleza va por el pase DIFERIDO interno de
-            # process_video (demand/*, chip ya renderizado en el mp4). Aquí solo
-            # se reporta; NO se lanza run_beauty_phase (los summaries de vídeo no
+            # VÍDEO (2026-07-21: ≥4 keypoints, sin gating demand/*): la belleza va por el
+            # pase DIFERIDO interno de process_video (chip ya renderizado en el mp4). Aquí
+            # solo se reporta; NO se lanza run_beauty_phase (los summaries de vídeo no
             # llevan bbox por persona).
             vb = (result or {}).get("beauty_classifications") or []
             if vb:
-                kv_table("Belleza (demand/*)", [
+                kv_table("Belleza (≥4 kpts)", [
                     (f"escena {c.get('scene')} · track {c.get('track_id')}",
                      str(c.get('score')))
                     for c in vb

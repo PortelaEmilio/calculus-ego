@@ -33,18 +33,28 @@ ENABLE_BEAUTY_INLINE_IMAGES = False # 2026-07-07: la inline queda SOLO para víd
 #   belleza la da únicamente el pase DIFERIDO (crop de cara, 5 keypoints faciales, LoRA checkpoint-1400,
 #   solo demand/*) → elimina la doble puntuación por imagen. True = comportamiento previo (inline también
 #   en imágenes, además del pase).
-BEAUTY_MIN_FACE_KEYPOINTS = 3       # Belleza en vídeo: mín. keypoints faciales visibles (de 5) para
-#   puntuar una cara; se elige por escena el frame con MÁS keypoints faciales y, a igualdad, el MÁS NÍTIDO.
+BEAUTY_MIN_FACE_KEYPOINTS = 4       # Belleza (vídeo E IMÁGENES): mín. keypoints faciales visibles (de 5)
+#   para puntuar una cara. 2026-07-21: subido 3→4 y aplicado en TODOS los paths (antes imágenes exigían 5
+#   vía has_five_face_keypoints_visible; vídeo usaba 3). La belleza ya NO se limita a personas demand/* —
+#   se puntúa toda cara con ≥ este nº de keypoints (ver _collect_beauty_pending / score_demand_beauty).
+#   En vídeo se elige por escena el frame con MÁS keypoints faciales y, a igualdad, el MÁS NÍTIDO.
 # Selección del frame de belleza por escena: frontalidad (nº de keypoints faciales) PRIMARIA, nitidez
 # (var. del Laplaciano) como desempate fuerte entre frames de igual frontalidad → evita elegir un frame
 # con desenfoque de movimiento (los keypoints se detectan con alta confianza aunque la cara esté movida,
 # así que la confianza no discriminaba el blur). sel_score = n_face + sharp/(sharp + K).
 BEAUTY_SHARP_TIEBREAK_K = 150.0     # K del squash de nitidez al desempate [0,1). Mayor K = nitidez pesa menos.
-BEAUTY_MIN_SHARPNESS = 60.0         # Descarta el crop de cara si var(Laplaciano) < umbral → NO puntúa belleza en
-#   escenas cuyo MEJOR frame sigue siendo borroso. Calibrado sobre friends.mp4 NATIVO (720p): los crops nítidos
-#   caen en 60–398, así que 60 tira solo las caras claramente movidas. ⚠️ CONTENT-DEPENDIENTE: en vídeo con
-#   AI-upscale (alisado) TODOS los crops caen <20 → 60 descartaría el 100%; re-calibrar/bajar a 0 para ese caso.
-#   Ver "Selección de frame de belleza por nitidez" en CLAUDE.md.
+BEAUTY_MIN_SHARPNESS = 0.0          # 2026-07-21: bajado 60→0 (decisión del usuario). Descartaba el crop de
+#   cara si var(Laplaciano) < umbral. 60 estaba calibrado sobre vídeo NATIVO (720p, crops nítidos 60–398) pero
+#   en vídeo AI-UPSCALE el alisado deja TODOS los crops <20 → 60 descartaba el 100% (p.ej. Friends 4K). Con 0
+#   no se filtra por nitidez → el AI-upscale produce belleza. ⚠️ CONTRAPARTIDA: en vídeo nativo ya NO se filtran
+#   caras con desenfoque de movimiento (antes 60 las tiraba). Ver "Selección de frame de belleza por nitidez".
+BEAUTY_MIN_HEAD_PX = 256            # 2026-07-21: mín. de min(alto,ancho) del recorte de CABEZA (extract_face_crop)
+#   para puntuar belleza; por debajo se DESCARTA (no se puntúa), en vídeo E imágenes. Ancla el tamaño de cara
+#   mínimo al de los datasets de entrenamiento (SCUT-FBP5500 / CFD / MEBeauty): el estimador preprocesa con
+#   thumbnail(672) SIN ampliar, así que una cara diminuta (p.ej. ~49px de IG) se queda diminuta y ancla la nota
+#   bajo (fuera de distribución). Valor = p5 del tamaño de cabeza percibido en esos datasets (mismo pipeline:
+#   thumbnail 672 + YOLO26-pose + extract_face_crop), medido sobre 891 caras: SCUT p5=241 / CFD p5=324 /
+#   MEBeauty p5=257 → p5 COMBINADO=256 (mediana 321). ⚠️ Descarta la mayoría de caras pequeñas de IG.
 ENABLE_GENDER_CLASSIFICATION = True # Clasificación de género
 ENABLE_AGE_CLASSIFICATION = True    # Clasificación de edad
 ENABLE_BEHAVIOUR_CLASSIFICATION = True # Clasificación de comportamiento (Demand/Offer con detalles)

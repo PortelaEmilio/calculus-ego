@@ -38,7 +38,7 @@ from config import (
     FACE_KEYPOINT_COUNT_FRONTAL_MIN, FACE_KEYPOINT_COUNT_PROFILE_MAX,
     MAX_SCENE_FRAMES_IN_MEMORY, COLLAGE_MIN_PANELS, COLLAGE_MIN_PANEL_SIZE_PERCENT,
     VISUALIZATION, BEAUTY_MIN_FACE_KEYPOINTS,
-    BEAUTY_SHARP_TIEBREAK_K, BEAUTY_MIN_SHARPNESS,
+    BEAUTY_SHARP_TIEBREAK_K, BEAUTY_MIN_SHARPNESS, BEAUTY_MIN_HEAD_PX,
 )
 
 
@@ -572,6 +572,12 @@ def _update_beauty_candidate(cand: dict, frame, kpts, bbox: tuple, local_idx: in
     face_crop = extract_face_crop(frame, kpts, bbox,
                                   min_points=BEAUTY_MIN_FACE_KEYPOINTS)
     if face_crop is None or face_crop.size == 0:
+        return
+
+    # Gate de tamaño mínimo de cabeza (anclado a los datasets de belleza): por debajo
+    # la cara es demasiado pequeña para el estimador (thumbnail 672 sin ampliar → ancla
+    # la nota bajo) → se descarta. Ver config.BEAUTY_MIN_HEAD_PX.
+    if min(face_crop.shape[0], face_crop.shape[1]) < BEAUTY_MIN_HEAD_PX:
         return
 
     sharp = face_sharpness(face_crop)
@@ -1164,19 +1170,16 @@ def _dump_scene_validation(validation_scenes, video_stem, output_dir,
 
 def _collect_beauty_pending(pending: list, best_candidates: dict, caches: dict,
                             scene_label, scene_start_frame: int):
-    """Recoge, tras clasificar una (sub)escena, los crops de cara de las personas
-    **demand/*** para el pase de belleza DIFERIDO del vídeo (2026-07-10: la belleza
-    de vídeo ya no se puntúa inline en `analyze_scene_vlm`; se puntúa al final del
-    vídeo, antes de la fase de anotación, con el mismo gating demand/* que las
-    imágenes). Guarda una referencia al `beauty_cache` de la escena para inyectar
-    el score después (el chip se dibuja desde ese caché en la anotación)."""
+    """Recoge, tras clasificar una (sub)escena, los crops de cara para el pase de
+    belleza DIFERIDO del vídeo (se puntúa al final del vídeo, antes de la fase de
+    anotación). 2026-07-21: se eliminó el gating demand/* — se puntúa TODA persona con
+    candidato de belleza válido (≥ BEAUTY_MIN_FACE_KEYPOINTS keypoints faciales y cabeza
+    ≥ BEAUTY_MIN_HEAD_PX; ambos gates ya aplicados en _update_beauty_candidate). Guarda
+    una referencia al `beauty_cache` de la escena para inyectar el score después (el chip
+    se dibuja desde ese caché en la anotación)."""
     for track_id, cand in best_candidates.items():
         beauty = cand.get('beauty')
         if not beauty or beauty.get('face_crop') is None:
-            continue
-        beh_entry = caches.get('behaviour', {}).get(track_id)
-        beh = beh_entry.get('behaviour') if isinstance(beh_entry, dict) else None
-        if not (isinstance(beh, str) and beh.startswith('demand')):
             continue
         pending.append({
             'scene_label': scene_label,

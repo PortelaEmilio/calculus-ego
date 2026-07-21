@@ -393,6 +393,15 @@ def has_five_face_keypoints_visible(keypoints: np.ndarray, min_conf: float = 0.5
     return valid_count == 5
 
 
+def count_face_keypoints_visible(keypoints: np.ndarray, min_conf: float = 0.5) -> int:
+    """Nº de keypoints faciales COCO (nose, eyes, ears; índices 0-4) con conf > min_conf.
+    Usado por el path de belleza para el gate ≥ BEAUTY_MIN_FACE_KEYPOINTS (reemplaza a
+    has_five_face_keypoints_visible, que exigía los 5)."""
+    if keypoints is None:
+        return 0
+    return len(_valid_face_keypoints(keypoints, min_conf))
+
+
 def get_face_keypoint_centroid(keypoints: np.ndarray, min_conf: float = 0.3):
     """
     Calcula el centroide de los keypoints faciales visibles (índices 0-4 COCO:

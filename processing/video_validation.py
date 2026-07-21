@@ -361,8 +361,9 @@ def categorize_video_scenes(meta: dict, models: dict) -> dict:
     out_scenes = []
     all_tracks = set()
     # Belleza DIFERIDA (2026-07-10): igual que en imágenes, la belleza NO se puntúa
-    # durante la clasificación; se recogen los rostros demand/* (crop de cara de la
-    # Fase A) y se puntúan al final del vídeo, tras clasificar todas sus escenas.
+    # durante la clasificación; se recogen los rostros con crop de cara válido (2026-07-21:
+    # SIN gating demand/* — toda persona con ≥ keypoints y cabeza suficiente) y se puntúan
+    # al final del vídeo, tras clasificar todas sus escenas.
     beauty_pending = []  # (person_dict, face_crop ndarray)
 
     for sc in meta.get('scenes', []):
@@ -475,11 +476,11 @@ def categorize_video_scenes(meta: dict, models: dict) -> dict:
             }
             persons.append(person_row)
 
-            # Candidato al pase diferido de belleza: demand/* con crop de cara.
-            beh = person_row.get('behaviour')
+            # Candidato al pase diferido de belleza (2026-07-21: SIN gating demand/* —
+            # toda persona con crop de cara válido; los gates de keypoints/tamaño/nitidez
+            # ya se aplicaron en Fase A vía _update_beauty_candidate).
             face_cand = best_candidates.get(tid, {}).get('beauty')
-            if (isinstance(beh, str) and beh.startswith('demand')
-                    and face_cand and face_cand.get('face_crop') is not None):
+            if face_cand and face_cand.get('face_crop') is not None:
                 beauty_pending.append((person_row, face_cand['face_crop']))
 
         out_scenes.append({
@@ -490,10 +491,10 @@ def categorize_video_scenes(meta: dict, models: dict) -> dict:
             'persons': persons,
         })
 
-    # ── Pase DIFERIDO de belleza (solo demand/*, 2026-07-10) ──
-    # Tras clasificar TODAS las escenas del vídeo, se puntúan los rostros demand/*
-    # recogidos (mismo gating que imágenes). Degrada con elegancia: sin estimador /
-    # --no-beauty → los person_row quedan con beauty=None.
+    # ── Pase DIFERIDO de belleza (2026-07-21: SIN gating demand/*) ──
+    # Tras clasificar TODAS las escenas del vídeo, se puntúan los rostros recogidos
+    # (toda persona con crop de cara válido; mismo criterio que imágenes). Degrada con
+    # elegancia: sin estimador / --no-beauty → los person_row quedan con beauty=None.
     import config as _config
     est = models.get('beauty_estimator')
     if (beauty_pending and est is not None

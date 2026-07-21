@@ -42,21 +42,26 @@ import pandas as pd
 
 import config
 from ui import header, info, success, warn
-from utils.visualization import has_five_face_keypoints_visible, extract_face_crop
+from utils.visualization import (has_five_face_keypoints_visible, extract_face_crop,
+                                 count_face_keypoints_visible)
 from processing.image import _iou_xyxy
 
 IMG_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
 DEMAND_IOU_THRESHOLD = 0.5
 
 
-def load_phase1_demand(phase1_path: str) -> dict:
-    """Lee summary_*.json de la fase 1 y devuelve, por imagen, sus bboxes demand/*.
+def load_phase1_demand(phase1_path: str, demand_only: bool = True) -> dict:
+    """Lee summary_*.json de la fase 1 y devuelve, por imagen, los bboxes de sus personas.
 
     Returns dict keyed por (a) ruta absoluta del input_file y (b) stem, cada uno →
     {"path": Path, "bboxes": [[x1,y1,x2,y2], ...], "demand": [{"bbox":[...],
-    "track_id": str}, ...]} con solo personas behaviour=demand/*. `demand` conserva
-    el track_id de cada bbox para poder enlazar la puntuación de belleza con la fila
-    por-persona del run (IoU del rostro detectado → demand entry → track_id).
+    "track_id": str}, ...]}. `demand` conserva el track_id de cada bbox para poder enlazar
+    la puntuación de belleza con la fila por-persona del run (IoU del rostro detectado →
+    entry → track_id).
+
+    2026-07-21: `demand_only` (default True para no romper el CLI standalone `--solo-demand`).
+    Con demand_only=False la lista `demand` incluye TODAS las personas (behaviour cualquiera),
+    de modo que el pase de belleza puntúa toda cara y recupera igualmente el track_id por IoU.
     """
     p = Path(phase1_path)
     files = sorted(p.glob("summary_*.json")) if p.is_dir() else [p]
@@ -74,7 +79,8 @@ def load_phase1_demand(phase1_path: str) -> dict:
         demand = [
             {"bbox": bc["bbox"], "track_id": bc.get("track_id")}
             for bc in result.get("behaviour_classifications", [])
-            if bc.get("bbox") and str(bc.get("behaviour", "")).startswith("demand")
+            if bc.get("bbox") and (not demand_only
+                                   or str(bc.get("behaviour", "")).startswith("demand"))
         ]
         entry = {"path": Path(img_path),
                  "bboxes": [d["bbox"] for d in demand],
@@ -196,23 +202,29 @@ def score_demand_beauty(items, demand_map, model_pose, estimator, *, solo_demand
                 x1, y1, x2, y2 = [float(v) for v in boxes[i]]
                 if (x2 - x1) * (y2 - y1) / frame_area < bbox_min:
                     continue
-                # Gate demand/*: solo puntuar si el bbox casa (IoU) con una persona
-                # demand de la fase 1; guardar el track_id de la mejor coincidencia.
-                track_id = None
-                if solo_demand:
-                    best_iou, best_tid = 0.0, None
-                    for d in demand_list:
-                        iou = _iou_xyxy((x1, y1, x2, y2), tuple(d["bbox"]))
-                        if iou > best_iou:
-                            best_iou, best_tid = iou, d.get("track_id")
-                    if best_iou < DEMAND_IOU_THRESHOLD:
-                        continue
-                    track_id = best_tid
-                kp = kpts_all[i]
-                if not has_five_face_keypoints_visible(kp):
+                # Recuperar el track_id de la persona de la fase 1 con mayor IoU (para
+                # enlazar la belleza con la fila por-persona en el merge). Con solo_demand
+                # se descarta la cara si no casa con una persona demand/*; sin él (2026-07-21,
+                # belleza para todas) se asigna el track_id de la mejor coincidencia y NO se
+                # descarta por comportamiento.
+                best_iou, best_tid = 0.0, None
+                for d in demand_list:
+                    iou = _iou_xyxy((x1, y1, x2, y2), tuple(d["bbox"]))
+                    if iou > best_iou:
+                        best_iou, best_tid = iou, d.get("track_id")
+                if solo_demand and best_iou < DEMAND_IOU_THRESHOLD:
                     continue
-                face = extract_face_crop(frame, kp, (x1, y1, x2, y2))
+                track_id = best_tid if best_iou >= DEMAND_IOU_THRESHOLD else None
+                kp = kpts_all[i]
+                if count_face_keypoints_visible(kp) < config.BEAUTY_MIN_FACE_KEYPOINTS:
+                    continue
+                face = extract_face_crop(frame, kp, (x1, y1, x2, y2),
+                                         min_points=config.BEAUTY_MIN_FACE_KEYPOINTS)
                 if face is None or face.size == 0:
+                    continue
+                # Gate de tamaño mínimo de cabeza (anclado a los datasets de belleza):
+                # por debajo se descarta (fuera de distribución). Ver config.BEAUTY_MIN_HEAD_PX.
+                if min(face.shape[0], face.shape[1]) < config.BEAUTY_MIN_HEAD_PX:
                     continue
                 res = estimator.estimate(face)
                 score = res.get("score")

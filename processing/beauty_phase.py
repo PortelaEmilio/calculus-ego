@@ -3,12 +3,13 @@
 Tras clasificar todas las imágenes con gemma4 (:11434, Ollama 0.23.2), este módulo:
   1. hace `ollama stop gemma4:e4b` → libera ~10 GB de VRAM en :11434,
   2. carga el estimador Qwen3-VL-4B en la instancia Ollama ≥0.30 de :11435,
-  3. puntúa belleza SOLO de los rostros demand/* (IoU>=0.5 con un bbox behaviour=demand
-     de la fase 1, leído de los summary_*.json del run).
+  3. puntúa belleza de TODA cara con ≥ BEAUTY_MIN_FACE_KEYPOINTS keypoints faciales y cabeza
+     ≥ BEAUTY_MIN_HEAD_PX (2026-07-21: se eliminó el gating demand/*). El track_id se recupera
+     por IoU contra las personas de la fase 1 (summary_*.json del run) para el merge.
 
-Reutiliza la lógica de `beauty_pass.py` (DRY): `load_phase1_demand`,
-`build_items_from_phase1`, `score_demand_beauty`. Degrada con elegancia: si el pase está
-desactivado (`config.ENABLE_BEAUTY_PASS=False` / `--no-beauty`), no hay personas demand/*,
+Reutiliza la lógica de `beauty_pass.py` (DRY): `load_phase1_demand` (con demand_only=False),
+`build_items_from_phase1`, `score_demand_beauty` (con solo_demand=False). Degrada con elegancia:
+si el pase está desactivado (`config.ENABLE_BEAUTY_PASS=False` / `--no-beauty`), no hay personas,
 o el servidor de belleza :11435 no responde → devuelve (None, None) sin abortar el run.
 
 Módulo neutro (no importa main) para evitar el ciclo main ↔ batch.
@@ -79,9 +80,12 @@ def run_beauty_phase(json_dir, model_pose, only_stem=None, shared_backend=None):
     if not getattr(config, "ENABLE_BEAUTY_PASS", True):
         return None, None
 
-    header("Pase de belleza diferido (solo demand/*)")
+    header("Pase de belleza diferido (≥4 keypoints, sin gating demand/*)")
 
-    demand_map = load_phase1_demand(str(json_dir))
+    # 2026-07-21: la belleza ya NO se limita a personas demand/* → se recogen TODAS las
+    # personas (demand_only=False) y se puntúa toda cara con ≥ BEAUTY_MIN_FACE_KEYPOINTS
+    # keypoints faciales y cabeza ≥ BEAUTY_MIN_HEAD_PX (gates en score_demand_beauty).
+    demand_map = load_phase1_demand(str(json_dir), demand_only=False)
     if only_stem is not None:
         demand_map = {k: v for k, v in demand_map.items()
                       if v["path"].stem == only_stem}
@@ -89,9 +93,9 @@ def run_beauty_phase(json_dir, model_pose, only_stem=None, shared_backend=None):
         info("  sin summaries de fase 1; omito belleza")
         return None, None
 
-    items = build_items_from_phase1(demand_map, solo_demand=True)
+    items = build_items_from_phase1(demand_map, solo_demand=False)
     if not items:
-        info("  sin personas demand/* en este run; omito belleza")
+        info("  sin personas en este run; omito belleza")
         return None, None
 
     from models.beauty import BeautyEstimator
@@ -117,14 +121,14 @@ def run_beauty_phase(json_dir, model_pose, only_stem=None, shared_backend=None):
     estimator = BeautyEstimator(backend=backend)
     score_col = f"IA Belleza (1-{int(estimator.scale[1])})"
 
-    info(f"  puntuando belleza de rostros demand/* en {len(items)} imágenes…")
+    info(f"  puntuando belleza de rostros (≥4 kpts) en {len(items)} imágenes…")
     df_rows, _df_img = score_demand_beauty(
-        items, demand_map, model_pose, estimator, solo_demand=True)
+        items, demand_map, model_pose, estimator, solo_demand=False)
 
     if df_rows.empty:
-        info("  ningún rostro demand/* puntuable (sin keypoints faciales / sin match IoU)")
+        info("  ningún rostro puntuable (sin ≥4 keypoints faciales / cabeza < BEAUTY_MIN_HEAD_PX)")
         return None, score_col
 
     n_scored = df_rows[score_col].apply(lambda v: isinstance(v, (int, float))).sum()
-    success(f"  {len(df_rows)} rostros demand/* · {n_scored} puntuados → columna '{score_col}'")
+    success(f"  {len(df_rows)} rostros (≥4 kpts) · {n_scored} puntuados → columna '{score_col}'")
     return df_rows, score_col
