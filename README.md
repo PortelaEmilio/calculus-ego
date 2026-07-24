@@ -9,10 +9,6 @@ analysis.
 
 🌐 **Live demo: [portela-navarro.com/demo](https://portela-navarro.com/demo)**
 
-▶️ Annotated video sample (1080p): [direct link](https://portela-navarro.com/assets/friends-intro-annotated-1080p.mp4)
-— the pipeline's per-person annotations rendered on a short clip (detection,
-pose, and the classification labels).
-
 ## Categories
 
 Per detected person:
@@ -26,6 +22,7 @@ Per detected person:
 - **Weight** — thin / median / overweight
 - **Musculature** — visible / not visible
 - **Social distance** — proxemic distance (Hall): intimate → public
+- **Size** — how much of the frame the person occupies: bounding-box area as a percentage of the frame, plus the raw bbox area (px) and its `[x1,y1,x2,y2]` coordinates
 - **Accessories** (multi-label) — makeup, tattoos, bags, belts, jewelry, headwear, eyewear
 - **Beauty** *(optional)* — facial attractiveness on a continuous 1–10 scale (one decimal),
   scored in a deferred pass over `demand/*` faces (see [Beauty](#beauty-optional))
@@ -53,7 +50,8 @@ Social distance is **deterministic from pose keypoints** (proxemic mapping from
 the lowest visible body part + bbox size); `demand/submission` behaviour is
 decided by a **pose gate** (camera-elevation read from shoulder-vs-eye geometry),
 not by the VLM. A `BBOX_MIN_FRAME_RATIO` gate drops detections too small for the
-VLM to read. Everything is greedy + seeded for reproducibility.
+VLM to read; each person's **size/occupancy** is read straight from that bounding
+box (no VLM). Everything is greedy + seeded for reproducibility.
 
 | Path | File |
 |---|---|
