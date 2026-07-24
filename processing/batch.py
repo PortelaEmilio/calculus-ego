@@ -81,6 +81,16 @@ def resolve_file_path(row, multimedia_dir):
     return path if path.exists() else None
 
 
+def _occupancy_stats_from_entries(entries):
+    """Media/máx de la ocupación (% del frame) de una lista de entradas por-persona
+    (las de gender_classifications, que llevan el campo `occupancy`). Devuelve
+    `(media, max)` redondeados a 2 decimales, o `(None, None)` si no hay datos."""
+    occs = [e.get('occupancy') for e in (entries or []) if e.get('occupancy') is not None]
+    if not occs:
+        return None, None
+    return round(float(np.mean(occs)), 2), round(float(np.max(occs)), 2)
+
+
 def extract_results_for_csv(result, content_type):
     """
     Extrae resultados de un análisis y los aplana en un diccionario para columnas CSV.
@@ -105,6 +115,8 @@ def extract_results_for_csv(result, content_type):
             'ia_peso_corporal': None,
             'ia_distancia_social': None,
             'ia_belleza_media': None,
+            'ia_ocupacion_media': None,
+            'ia_ocupacion_max': None,
             'ia_ocr_texto': None,
             'ia_analisis_estado': 'error',
         }
@@ -210,6 +222,10 @@ def extract_results_for_csv(result, content_type):
         else:
             data['ia_belleza_media'] = None
 
+        # Ocupación: media/máx del % de frame por persona. En collage es relativa
+        # al PANEL (cada panel se clasifica por separado), no a la imagen completa.
+        data['ia_ocupacion_media'], data['ia_ocupacion_max'] = _occupancy_stats_from_entries(all_genders)
+
         data['ia_ocr_texto'] = None
         data['ia_analisis_estado'] = 'completado'
         return data
@@ -301,6 +317,9 @@ def extract_results_for_csv(result, content_type):
         else:
             data['ia_belleza_media'] = None
 
+        # Ocupación: media/máx del % de frame que ocupa cada persona.
+        data['ia_ocupacion_media'], data['ia_ocupacion_max'] = _occupancy_stats_from_entries(gc)
+
         data['ia_ocr_texto'] = None
 
     # --- Video ---
@@ -368,6 +387,10 @@ def extract_results_for_csv(result, content_type):
         else:
             data['ia_belleza_media'] = None
 
+        occ_stats = result.get('occupancy_statistics', {}) or {}
+        data['ia_ocupacion_media'] = occ_stats.get('mean')
+        data['ia_ocupacion_max'] = occ_stats.get('max')
+
         ocr = result.get('ocr_results', {})
         if ocr:
             all_texts = []
@@ -391,6 +414,8 @@ def extract_results_for_csv(result, content_type):
         data['ia_peso_corporal'] = None
         data['ia_distancia_social'] = None
         data['ia_belleza_media'] = None
+        data['ia_ocupacion_media'] = None
+        data['ia_ocupacion_max'] = None
         data['ia_ocr_texto'] = None
         for col_name in ACCESSORY_CSV_COLUMNS.values():
             data[col_name] = None
@@ -567,7 +592,8 @@ def process_batch(csv_path, sample_size=400, multimedia_dir=None, output_csv=Non
         'ia_comportamiento', 'ia_actividad', 'ia_exposicion_cuerpo',
         'ia_ubicacion', 'ia_peso_corporal',
         *list(ACCESSORY_CSV_COLUMNS.values()),
-        'ia_distancia_social', 'ia_belleza_media', 'ia_ocr_texto',
+        'ia_distancia_social', 'ia_belleza_media',
+        'ia_ocupacion_media', 'ia_ocupacion_max', 'ia_ocr_texto',
         'ia_analisis_estado'
     ]
 

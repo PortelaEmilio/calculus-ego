@@ -40,7 +40,7 @@ from processing.video import (
     _update_beauty_candidate,
 )
 from processing import person_dedup
-from utils.visualization import is_frontal_pose_with_waist, count_visible_keypoints
+from utils.visualization import is_frontal_pose_with_waist, count_visible_keypoints, bbox_occupancy
 from models.accessory import ACCESSORY_CATEGORIES
 
 
@@ -457,10 +457,15 @@ def categorize_video_scenes(meta: dict, models: dict) -> dict:
                 cat: (int(acc_data.get(cat, 0)) if isinstance(acc_data, dict) else None)
                 for cat in ACCESSORY_CATEGORIES
             }
+            # Tamaño / ocupación de la persona en el frame (mismo cálculo que en imagen).
+            _area, _occ = bbox_occupancy(p.get('bbox'), width, height)
             person_row = {
                 'track_id': tid,
                 'crop_path': p['general_crop_file'],
                 'bbox': p['bbox'],
+                'bbox_xyxy': p.get('bbox'),
+                'bbox_area': _area,
+                'occupancy': _occ,
                 'gender':            _get('gender', tid, 'gender'),
                 'age_group':         _get('age', tid, 'age_group'),
                 'behaviour':         _get('behaviour', tid, 'behaviour'),

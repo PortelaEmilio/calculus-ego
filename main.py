@@ -54,7 +54,8 @@ ACC_TO_COL = {
 
 FINAL_COLS = [
     "Img. orig.", "Img. anot.", "Estado",
-    "IA Nº pers.", "IA Gen.", "IA Edad", "IA Comport.", "IA Activ.",
+    "IA Nº pers.", "IA Tamaño (%)", "IA BBox px", "IA BBox xyxy",
+    "IA Gen.", "IA Edad", "IA Comport.", "IA Activ.",
     "IA Exp. Cp.", "IA Ubic.", "IA Peso", "IA Musculatura", "IA Vestimenta", "IA Dist. Soc.", "IA Belleza (1-10)",
     "IA Maquill.", "IA Tattoos", "IA Bolsos", "IA Cints.", "IA Joyas", "IA Sombr.", "IA Gafas",
     "Valid.", "Revisor", "Notas",
@@ -97,6 +98,9 @@ def build_video_rows(run_id, img_id, img_path, result, json_path):
             row = {
                 "Estado":        "ok",
                 "IA Nº pers.":   n_tracks,
+                "IA Tamaño (%)": p.get("occupancy"),
+                "IA BBox px":    p.get("bbox_area"),
+                "IA BBox xyxy":  json.dumps(p.get("bbox_xyxy")) if p.get("bbox_xyxy") else None,
                 "IA Gen.":       p.get("gender"),
                 "IA Edad":       p.get("age_group"),
                 "IA Comport.":   p.get("behaviour"),
@@ -199,6 +203,9 @@ def build_rows(run_id, img_id, img_path, result, json_path):
             "Img. anot.":     None,
             "Estado":         vlm_status,
             "IA Nº pers.":    n_yolo,
+            "IA Tamaño (%)":  gen.get("occupancy")     if gen  else None,
+            "IA BBox px":     gen.get("bbox_area")     if gen  else None,
+            "IA BBox xyxy":   json.dumps(gen.get("bbox")) if (gen and gen.get("bbox")) else None,
             "IA Gen.":        gen.get("gender")        if gen  else None,
             "IA Edad":        age.get("age_group")     if age  else None,
             "IA Comport.":    beh.get("behaviour")     if beh  else None,
@@ -1723,6 +1730,12 @@ def _render_result_summary(result, file_ext, image_extensions):
 
     def _render_image_categories(persons, gen, age, beh, act, bdis, loc, bsh, acc, soc, beauty):
         kv_table("Detecciones", [("Personas", persons)])
+        occs = [g.get('occupancy') for g in gen if g.get('occupancy') is not None]
+        if occs:
+            kv_table("Tamaño (% frame)", [
+                ("Media", f"{sum(occs)/len(occs):.1f}%"),
+                ("Máx",   f"{max(occs):.1f}%"),
+            ])
         image_pairs = [
             (ENABLE_GENDER_CLASSIFICATION,       "Género",            gen,  'gender'),
             (ENABLE_AGE_CLASSIFICATION,          "Edad",              age,  'age_group'),
@@ -1817,6 +1830,10 @@ def _render_result_summary(result, file_ext, image_extensions):
         rows.append(("Personas únicas", result['unique_persons_tracked']))
     if 'avg_persons_per_frame' in result:
         rows.append(("Avg p/frame", result['avg_persons_per_frame']))
+    _occ = result.get('occupancy_statistics') or {}
+    if _occ.get('mean') is not None:
+        rows.append(("Tamaño medio", f"{_occ['mean']:.1f}%"))
+        rows.append(("Tamaño máx",   f"{_occ['max']:.1f}%"))
     kv_table("Video", rows)
 
     def _from_stats(stats_key, dist_key):

@@ -36,6 +36,7 @@ from utils.visualization import (
     render_person_annotated_crop, save_person_annotated_crop,
     is_waist_visible, is_shoulder_visible, is_frontal_pose_with_waist, has_five_face_keypoints_visible,
     extract_face_crop, get_color_for_track_id, count_visible_keypoints, draw_scene_number,
+    bbox_occupancy,
 )
 from models.accessory import ACCESSORY_CATEGORIES
 
@@ -584,6 +585,14 @@ def annotate_frame(frame: np.ndarray, results_detect, results_pose,
         for crop_idx, (person_idx, track_id, x1, y1, x2, y2, has_shoulder_visible, kpts, box) in enumerate(all_metadata):
             person_crop = all_crops[crop_idx]
 
+            # Tamaño / ocupación de la persona: área del bbox y % del frame que ocupa.
+            # Se adjunta a la entrada ancla (gender_classifications) → build_rows lo
+            # superficie como columnas IA Tamaño/BBox. Misma fórmula que BBOX_MIN_FRAME_RATIO.
+            bbox_xyxy = [int(x1), int(y1), int(x2), int(y2)]
+            bbox_area, occupancy = bbox_occupancy(
+                bbox_xyxy, frame.shape[1], frame.shape[0]
+            )
+
             gender_info = gender_results[crop_idx] if crop_idx < len(gender_results) else None
             age_info = age_results[crop_idx] if crop_idx < len(age_results) else None
             behaviour_info = behaviour_results[crop_idx] if crop_idx < len(behaviour_results) else None
@@ -600,7 +609,10 @@ def annotate_frame(frame: np.ndarray, results_detect, results_pose,
                     "track_id": track_id,
                     "frame": frame_idx,
                     "gender": gender_info.get("gender"),
-                    "all_predictions": gender_info.get("all_predictions")
+                    "all_predictions": gender_info.get("all_predictions"),
+                    "bbox": bbox_xyxy,
+                    "bbox_area": bbox_area,
+                    "occupancy": occupancy,
                 })
                 gender_cache[track_id] = {
                     "gender": gender_info.get("gender"),
@@ -618,6 +630,9 @@ def annotate_frame(frame: np.ndarray, results_detect, results_pose,
                         "track_id": track_id,
                         "frame": frame_idx,
                         "gender": cached_gender["gender"],
+                        "bbox": bbox_xyxy,
+                        "bbox_area": bbox_area,
+                        "occupancy": occupancy,
                     })
 
             # Guardar clasificaciones de edad

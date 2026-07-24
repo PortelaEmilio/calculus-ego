@@ -557,6 +557,26 @@ def face_sharpness(crop: np.ndarray) -> float:
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
+def bbox_occupancy(bbox, frame_w: int, frame_h: int):
+    """Tamaño de un bbox (xyxy) y qué fracción del frame ocupa.
+
+    Devuelve `(bbox_area_px, occupancy_pct)`:
+      - `bbox_area_px` = (x2-x1)·(y2-y1) en píxeles (int).
+      - `occupancy_pct` = 100·bbox_area/frame_area, redondeado a 2 decimales.
+    Es la misma aritmética que el filtro `BBOX_MIN_FRAME_RATIO`, reutilizada para
+    reportar "cuánto ocupa" cada persona en la imagen. `bbox` es `(x1,y1,x2,y2)` o
+    una lista equivalente; `None`/inválido → `(None, None)`.
+    """
+    if not bbox or len(bbox) < 4:
+        return None, None
+    x1, y1, x2, y2 = bbox[0], bbox[1], bbox[2], bbox[3]
+    area = max(0, int(x2) - int(x1)) * max(0, int(y2) - int(y1))
+    if not frame_w or not frame_h:   # sin dimensiones de frame: solo el área, sin %
+        return int(area), None
+    frame_area = max(1, int(frame_w) * int(frame_h))
+    return int(area), round(100.0 * area / frame_area, 2)
+
+
 def get_limb_color(connection_idx: int) -> tuple:
     """Obtiene el color para una conexión del esqueleto según su parte del cuerpo."""
     if connection_idx < 4:

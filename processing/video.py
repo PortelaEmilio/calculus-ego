@@ -51,6 +51,7 @@ def _fade_alpha_for(frames_into_scene: int, fps: int) -> float:
 from utils.visualization import (
     has_five_face_keypoints_visible, extract_face_crop, is_frontal_pose_with_waist,
     count_visible_keypoints, get_face_keypoint_centroid, put_text_pil, face_sharpness,
+    bbox_occupancy,
 )
 from processing.image import annotate_frame, detect_collage_panels
 
@@ -1098,9 +1099,21 @@ def analyze_scene_vlm(best_candidates: dict, first_frame, scene_num: int,
     return caches, classifications, ocr_result
 
 
+def _accumulate_candidate_occupancies(best_candidates, width, height, out_list):
+    """Añade a `out_list` la ocupación (% del frame) de cada persona con bbox en
+    `best_candidates`. Alimenta `occupancy_statistics` del resultado de vídeo (batch)."""
+    for _tid in best_candidates:
+        _gen = best_candidates[_tid].get('general')
+        if _gen and _gen.get('bbox'):
+            _, _occ = bbox_occupancy(_gen['bbox'], width, height)
+            if _occ is not None:
+                out_list.append(_occ)
+
+
 def _dump_scene_validation(validation_scenes, video_stem, output_dir,
                            scene_label, start_frame, end_frame,
-                           best_candidates, caches, full_frame):
+                           best_candidates, caches, full_frame,
+                           width=None, height=None):
     """Persiste, para una (sub)escena, el frame completo limpio + el crop limpio de
     cada persona, y acumula un registro escena→personas con sus etiquetas IA. Usado
     SOLO cuando `process_video(..., validation_dump=True)` (validación de vídeo). No
@@ -1141,10 +1154,15 @@ def _dump_scene_validation(validation_scenes, video_stem, output_dir,
         }
 
         bbox = general.get('bbox')
+        bbox_list = [int(v) for v in bbox] if bbox else None
+        _area, _occ = bbox_occupancy(bbox_list, width, height) if bbox_list else (None, None)
         persons.append({
             'track_id': track_id,
             'crop_path': str(cp),
-            'bbox': [int(v) for v in bbox] if bbox else None,
+            'bbox': bbox_list,
+            'bbox_xyxy': bbox_list,
+            'bbox_area': _area,
+            'occupancy': _occ,
             'gender':            _get('gender', track_id, 'gender'),
             'age_group':         _get('age', track_id, 'age_group'),
             'behaviour':         _get('behaviour', track_id, 'behaviour'),
@@ -1260,6 +1278,7 @@ def process_video(video_path: Path, model_detect, model_pose,
     unique_tracks = set()
     frame_detections = []
     all_beauty_scores = []
+    all_occupancy_values = []   # ocupación (% del frame) por persona×escena → occupancy_statistics (batch)
     all_gender_classifications = []
     all_age_classifications = []
     all_behaviour_classifications = []
@@ -1446,7 +1465,10 @@ def process_video(video_path: Path, model_detect, model_pose,
                             sub_scene_label, sub_start_global,
                             sub_start_global + sub_frame_count,
                             sub_best, sub_caches, sub_first_frame,
+                            width, height,
                         )
+
+                    _accumulate_candidate_occupancies(sub_best, width, height, all_occupancy_values)
 
                     del sub_first_frame, sub_best
 
@@ -1613,7 +1635,10 @@ def process_video(video_path: Path, model_detect, model_pose,
                             sub_scene_label, sub_start_global,
                             sub_start_global + len(sub_frames),
                             sub_best, caches, first_frame_sub,
+                            width, height,
                         )
+
+                    _accumulate_candidate_occupancies(sub_best, width, height, all_occupancy_values)
 
                 # ANOTACIÓN DIFERIDA: registrar el trabajo de render y liberar los
                 # frames (la metadata YOLO se conserva ligera con orig_img=None; los
@@ -1818,10 +1843,18 @@ def process_video(video_path: Path, model_detect, model_pose,
         + f"avg/frame=[cyan]{avg_persons:.1f}[/]  max=[cyan]{max_persons}"
     )
 
+    occupancy_stats = {}
+    if all_occupancy_values:
+        occupancy_stats = {
+            "mean": round(float(np.mean(all_occupancy_values)), 2),
+            "max": round(float(np.max(all_occupancy_values)), 2),
+        }
+
     result_info = {
         "input_path": str(video_path),
         "output_path": str(output_path),
         "resolution": {"width": width, "height": height},
+        "occupancy_statistics": occupancy_stats,
         "fps": fps,
         "duration_seconds": duration_sec,
         "total_frames": total_frames,
