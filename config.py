@@ -638,6 +638,7 @@ CATEGORY_COLORS = {
     "social_distance": (238, 211,  34),   # cian
     "beauty":          (175, 164, 253),   # rosa palo
     "accessory":       ( 53, 230, 163),   # lima
+    "size":            (190, 190, 190),   # gris neutro (chip de ocupación del bbox)
 }
 CATEGORY_TEXT_COLOR = (0, 0, 0)           # BGR negro puro para el texto de la píldora (legibilidad)
 

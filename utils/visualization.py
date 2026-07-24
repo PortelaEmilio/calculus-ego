@@ -721,7 +721,7 @@ def build_person_display_attrs(gender_info=None, age_info=None, behaviour_info=N
                                 activity_info=None, body_display_info=None,
                                 location_info=None, body_shape_info=None,
                                 accessory_info=None, social_distance_info=None,
-                                beauty_score=None) -> list[tuple[str, str]]:
+                                beauty_score=None, occupancy=None) -> list[tuple[str, str]]:
     """Construye la lista ordenada [(category_key, display_text)] de una persona.
 
     Contenido reducido y SIN confianza: silueta/peso/musculatura/distancia social
@@ -780,6 +780,10 @@ def build_person_display_attrs(gender_info=None, age_info=None, behaviour_info=N
     if ENABLE_BEAUTY_ESTIMATION and beauty_score is not None:
         if isinstance(beauty_score, (int, float)):
             attrs.append(("beauty", f"Beauty {float(beauty_score):.1f}"))
+
+    # Tamaño / ocupación del bbox (% del frame). Siempre que se conozca (no gated por flag).
+    if occupancy is not None and isinstance(occupancy, (int, float)):
+        attrs.append(("size", f"Size {float(occupancy):.1f}%"))
 
     if accessory_info and accessory_info.get("success") and ENABLE_ACCESSORY_CLASSIFICATION:
         letters = [ltr for key, ltr in _ACCESSORY_LETTERS.items() if accessory_info.get(key) == 1]
@@ -968,7 +972,8 @@ def draw_detection_with_info(frame: np.ndarray, box, track_id: int | None = None
                               body_display_info: dict | None = None, location_info: dict | None = None,
                               body_shape_info: dict | None = None, accessory_info: dict | None = None,
                               social_distance_info: dict | None = None,
-                              person_color: tuple | None = None) -> np.ndarray:
+                              person_color: tuple | None = None,
+                              occupancy: float | None = None) -> np.ndarray:
     """
     Dibuja un bounding box con información de tracking, género, edad, belleza y distancia social.
     Las métricas se posicionan inteligentemente para estar siempre visibles en el frame.
@@ -1039,6 +1044,7 @@ def draw_detection_with_info(frame: np.ndarray, box, track_id: int | None = None
     attrs = build_person_display_attrs(
         gender_info, age_info, behaviour_info, activity_info, body_display_info,
         location_info, body_shape_info, accessory_info, social_distance_info, beauty_score,
+        occupancy=occupancy,
     )
     label_lines.extend(text for _key, text in attrs)
 
@@ -1249,6 +1255,9 @@ def render_person_annotated_crop(
     if bw <= 0 or bh <= 0:
         return None
 
+    # Ocupación respecto al FRAME COMPLETO original (no al recorte), para el chip de tamaño.
+    _, _occ = bbox_occupancy([x1, y1, x2, y2], w, h)
+
     mx = max(1, int(bw * margin_percent))
     my = max(1, int(bh * margin_percent))
     cx1 = max(0, x1 - mx)
@@ -1288,6 +1297,7 @@ def render_person_annotated_crop(
         body_shape_info=body_shape_info, accessory_info=accessory_info,
         social_distance_info=social_distance_info,
         person_color=person_color,
+        occupancy=_occ,
     )
     return crop
 

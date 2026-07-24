@@ -892,6 +892,7 @@ def annotate_frame(frame: np.ndarray, results_detect, results_pose,
                     gender_info, age_info, behaviour_info, activity_info,
                     body_display_info, location_info, body_shape_info,
                     accessory_info, social_distance_info, beauty_score,
+                    occupancy=occupancy,
                 )
                 annotated = draw_corner_bbox(
                     annotated, bx1, by1, bx2, by2,
@@ -907,7 +908,7 @@ def annotate_frame(frame: np.ndarray, results_detect, results_pose,
                 annotated = draw_detection_with_info(
                     annotated, box, track_id, beauty_score, gender_info, age_info,
                     behaviour_info, activity_info, body_display_info, location_info, body_shape_info, accessory_info, social_distance_info,
-                    person_color=person_color
+                    person_color=person_color, occupancy=occupancy
                 )
 
     # Dibujar esqueletos
