@@ -161,17 +161,24 @@ def build_items_from_phase1(demand_map: dict, solo_demand: bool) -> list:
     return items
 
 
-def score_demand_beauty(items, demand_map, model_pose, estimator, *, solo_demand=True):
+def score_demand_beauty(items, demand_map, model_pose, estimator, *, solo_demand=True,
+                        min_head_px=None):
     """Puntúa belleza de los rostros de `items` y devuelve (df_rows, df_img).
 
     Con `solo_demand`, un rostro solo se puntúa si su bbox detectado hace IoU>=0.5 con
     un bbox demand/* de la fase 1 (`demand_map`); además `df_rows` lleva el `track_id`
     de la persona demand con la que casa (mayor IoU) → permite enlazar la puntuación con
     la fila por-persona del run. Lógica idéntica a la del pase standalone (DRY).
+
+    `min_head_px`: override del gate de tamaño de cabeza (`min(alto,ancho)` del recorte);
+    si es None usa `config.BEAUTY_MIN_HEAD_PX`. Para dominios de cara pequeña que llena el
+    frame (p.ej. avatares 168px) se pasa 0 para desactivar el gate. `df_rows` incluye la
+    columna diagnóstica `head_px` para post-filtrar sin re-correr.
     """
     score_hi = int(estimator.scale[1])
     score_col = f"IA Belleza (1-{score_hi})"
     bbox_min = getattr(config, "BBOX_MIN_FRAME_RATIO", 0.01)
+    head_px_floor = config.BEAUTY_MIN_HEAD_PX if min_head_px is None else min_head_px
     rows, per_image = [], []
 
     for k, (img_id, path) in enumerate(items):
@@ -224,7 +231,8 @@ def score_demand_beauty(items, demand_map, model_pose, estimator, *, solo_demand
                     continue
                 # Gate de tamaño mínimo de cabeza (anclado a los datasets de belleza):
                 # por debajo se descarta (fuera de distribución). Ver config.BEAUTY_MIN_HEAD_PX.
-                if min(face.shape[0], face.shape[1]) < config.BEAUTY_MIN_HEAD_PX:
+                head_px = int(min(face.shape[0], face.shape[1]))
+                if head_px < head_px_floor:
                     continue
                 res = estimator.estimate(face)
                 score = res.get("score")
@@ -232,6 +240,7 @@ def score_demand_beauty(items, demand_map, model_pose, estimator, *, solo_demand
                     "Img ID": img_id, "Ruta Img.": str(path), "person_idx": person_idx,
                     "track_id": track_id,
                     "bbox": [round(x1), round(y1), round(x2), round(y2)],
+                    "head_px": head_px,
                     score_col: score, "raw": res.get("raw_response"),
                 })
                 if isinstance(score, (int, float)):
@@ -247,6 +256,76 @@ def score_demand_beauty(items, demand_map, model_pose, estimator, *, solo_demand
     return pd.DataFrame(rows), pd.DataFrame(per_image)
 
 
+def _norm_img_id(v) -> str:
+    """Normaliza Img ID a string para el join (tolera float64 de Excel: 12345.0 → '12345').
+    Los stems textuales (p.ej. '2025-01_user') pasan tal cual."""
+    if v is None:
+        return ""
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    s = str(v).strip()
+    if s.endswith(".0") and s[:-2].isdigit():
+        return s[:-2]
+    return s
+
+
+def merge_beauty_into_master(master_path: str, df_rows: pd.DataFrame, score_col: str,
+                             sheet: str = "Sheet1", backup: bool = True) -> None:
+    """Rellena `score_col` en el xlsx maestro por (Img ID, Pers. Key)==(Img ID, track_id).
+
+    Conserva todas las columnas/hojas del maestro; crea la columna de belleza si faltara.
+    Respalda a `<maestro>.bak` antes de sobrescribir. Las caras sin fila coincidente
+    (track_id no recuperado / persona extra) no se fusionan; las filas del maestro sin cara
+    puntuada quedan como están (NaN).
+    """
+    import shutil
+    mp = Path(master_path)
+    if not mp.exists():
+        warn(f"  --merge-into: no existe el maestro {mp}"); return
+
+    # Mapa (img_id_norm, track_id) → score, solo de rostros con score numérico y track_id.
+    score_by_key: dict = {}
+    for r in df_rows.to_dict("records"):
+        tid = r.get("track_id")
+        sc = r.get(score_col)
+        if tid is None or not isinstance(sc, (int, float)):
+            continue
+        score_by_key[(_norm_img_id(r.get("Img ID")), str(tid))] = sc
+
+    if not score_by_key:
+        warn("  --merge-into: no hay rostros puntuados con track_id → nada que fusionar."); return
+
+    xls = pd.ExcelFile(mp, engine="openpyxl")
+    if sheet not in xls.sheet_names:
+        warn(f"  --merge-into: la hoja '{sheet}' no está en {mp.name} ({xls.sheet_names})."); return
+    sheets = {sn: xls.parse(sn) for sn in xls.sheet_names}
+    df = sheets[sheet]
+    for req in ("Img ID", "Pers. Key"):
+        if req not in df.columns:
+            warn(f"  --merge-into: falta la columna '{req}' en la hoja '{sheet}'."); return
+    if score_col not in df.columns:
+        df[score_col] = np.nan
+
+    def _lookup(row):
+        key = (_norm_img_id(row["Img ID"]), str(row["Pers. Key"]))
+        return score_by_key.get(key, row[score_col])
+
+    n_before = int(df[score_col].notna().sum())
+    df[score_col] = df.apply(_lookup, axis=1)
+    n_after = int(df[score_col].notna().sum())
+    sheets[sheet] = df
+
+    if backup:
+        bak = mp.with_suffix(mp.suffix + ".bak")
+        shutil.copy2(mp, bak)
+        info(f"  backup → {bak.name}")
+    with pd.ExcelWriter(mp, engine="openpyxl") as xw:
+        for sn, sdf in sheets.items():
+            sdf.to_excel(xw, sheet_name=sn, index=False)
+    success(f"  maestro fusionado: {score_col} pobladas {n_before} → {n_after} "
+            f"(+{n_after - n_before}) en {mp.name}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--input", default=None, help="xlsx (Img ID/Ruta Img.), csv (--img-col), dir o glob")
@@ -257,13 +336,24 @@ def main():
                     help="dir con summary_*.json (o un .json) de la fase 1 → bboxes demand/*")
     ap.add_argument("--solo-demand", action="store_true",
                     help="puntuar solo rostros cuyo bbox hace IoU>=0.5 con un bbox demand/* (requiere --phase1-json)")
+    ap.add_argument("--min-head-px", type=int, default=None,
+                    help="override del gate de tamaño de cabeza (min(alto,ancho) del recorte); "
+                         "default = config.BEAUTY_MIN_HEAD_PX. Usar 0 para desactivarlo (p.ej. avatares 168px).")
+    ap.add_argument("--merge-into", default=None,
+                    help="xlsx maestro (carpeta/manual) a rellenar por (Img ID, Pers. Key)==(Img ID, track_id)")
+    ap.add_argument("--merge-sheet", default="Sheet1", help="hoja del maestro a fusionar (default Sheet1)")
+    ap.add_argument("--no-backup", action="store_true",
+                    help="no escribir <maestro>.bak antes de fusionar (por defecto SÍ respalda)")
     ap.add_argument("--limit", type=int, default=0)
     args = ap.parse_args()
 
     if args.solo_demand and not args.phase1_json:
         warn("--solo-demand requiere --phase1-json (de dónde salen los bboxes demand/*)."); sys.exit(1)
 
-    demand_map = load_phase1_demand(args.phase1_json) if args.phase1_json else {}
+    # Sin --solo-demand se puntúa TODA cara → el mapa debe llevar el track_id de CADA persona
+    # (demand_only=False) para poder enlazar la belleza con su fila en el merge.
+    demand_map = (load_phase1_demand(args.phase1_json, demand_only=args.solo_demand)
+                  if args.phase1_json else {})
 
     if args.input:
         items = collect_inputs(args)
@@ -296,7 +386,8 @@ def main():
     score_col = f"IA Belleza (1-{score_hi})"
 
     df_rows, df_img = score_demand_beauty(
-        items, demand_map, model_pose, estimator, solo_demand=args.solo_demand)
+        items, demand_map, model_pose, estimator, solo_demand=args.solo_demand,
+        min_head_px=args.min_head_px)
     rows = df_rows.to_dict("records")
     per_image = df_img.to_dict("records")
     out = Path(args.output)
@@ -311,6 +402,10 @@ def main():
 
     n_scored = sum(1 for r in rows if isinstance(r.get(score_col), (int, float)))
     success(f"  {len(rows)} rostros ({n_scored} puntuados) en {len(per_image)} imágenes → {out}")
+
+    if args.merge_into:
+        merge_beauty_into_master(args.merge_into, df_rows, score_col,
+                                 sheet=args.merge_sheet, backup=not args.no_backup)
 
 
 if __name__ == "__main__":

@@ -686,7 +686,10 @@ _SILHOUETTE_LABELS = {
     "inverted triangle": "Inv. triangle", "rectangle": "Rectangle",
     "pear": "Pear", "hourglass": "Hourglass", "triangle": "Triangle",
 }
-_WEIGHT_LABELS = {"thin": "Thin", "median": "Median", "overweight": "Overweight"}
+# Adiposity (2026-07-22): el valor canónico es low/median/high; las claves legacy
+# (thin/median/overweight) se mantienen para re-renderizar summaries antiguos (carpeta).
+_WEIGHT_LABELS = {"low": "Low", "medium": "Medium", "high": "High",
+                  "thin": "Low", "median": "Medium", "overweight": "High"}
 _ATTIRE_LABELS = {
     "underwear/swimwear": "Underwear/Swim", "sportswear": "Sportswear",
     "uniform": "Uniform", "formal": "Formal", "casual": "Casual",
@@ -861,28 +864,18 @@ def _measure_text(text: str, font) -> tuple[int, int]:
     return w, h
 
 
-def draw_person_chips(frame: np.ndarray, x1: int, y1: int, x2: int, y2: int,
-                      track_id, person_color: tuple,
-                      attrs: list[tuple[str, str]], fade_alpha: float = 1.0) -> np.ndarray:
-    """Dibuja las clases de una persona como píldoras redondeadas flotantes.
-
-    Las píldoras se disponen en filas (flow-wrap) preferentemente encima del bbox;
-    si no caben arriba, debajo. Cada píldora usa el color de su categoría
-    (CATEGORY_COLORS) con `chip_opacity` y texto oscuro. Sin cabecera de ID.
-    `fade_alpha` atenúa el conjunto (fade-in por escena). `person_color` se conserva
-    en la firma por compatibilidad pero ya no se usa (las esquinas son blancas fijas).
+def _layout_person_chip_block(fh: int, fw: int, x1: int, y1: int, x2: int, y2: int,
+                               attrs: list[tuple[str, str]],
+                               max_block_w: int | None = None) -> dict | None:
+    """Calcula filas/tamaño/posición preferida del bloque de píldoras de una persona,
+    sin dibujar nada. `max_block_w` (opcional) acota el ancho por debajo de la
+    heurística por defecto (bbox + 160px×escala) para no invadir a un vecino cercano.
+    Devuelve None si no hay atributos que mostrar.
     """
-    if fade_alpha <= 0.02 or not PIL_AVAILABLE:
-        if not PIL_AVAILABLE:
-            # Fallback mínimo: caja de esquinas, sin píldoras
-            return draw_corner_bbox(frame, x1, y1, x2, y2,
-                                    VISUALIZATION.get("corner_color", (255, 255, 255)),
-                                    VISUALIZATION.get("corner_bracket_thickness", 3),
-                                    VISUALIZATION.get("corner_bracket_len", 20), fade_alpha)
-        return frame
-
-    fh, fw = frame.shape[:2]
     x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+    chips = list(attrs)
+    if not chips:
+        return None
 
     s = _annotation_scale(fh)  # escala por resolución (1.0 a ≤720p, hasta 4× en 4K)
     font_size = int(round(VISUALIZATION.get("chip_font_size", 15) * s))
@@ -891,12 +884,6 @@ def draw_person_chips(frame: np.ndarray, x1: int, y1: int, x2: int, y2: int,
     pad_y = int(round(VISUALIZATION.get("chip_pad_y", 5) * s))
     gap = int(round(VISUALIZATION.get("chip_gap", 5) * s))
     radius = int(round(VISUALIZATION.get("chip_radius", 9) * s))
-    opacity = float(VISUALIZATION.get("chip_opacity", 0.82)) * max(0.0, min(1.0, fade_alpha))
-
-    # Sin cabecera de ID: los chips son solo los atributos de clase.
-    chips = list(attrs)
-    if not chips:
-        return frame
 
     # Medir cada píldora
     measured = []  # (key, text, w, h)
@@ -907,8 +894,16 @@ def draw_person_chips(frame: np.ndarray, x1: int, y1: int, x2: int, y2: int,
         measured.append((key, text, tw, th))
     chip_h = max_text_h + pad_y * 2
 
-    # Flow-wrap en filas limitadas al ancho disponible (bbox extendido, mínimo 220px×escala)
-    avail_w = max(int(220 * s), min(fw - 8, (x2 - x1) + int(160 * s)))
+    # Flow-wrap en filas limitadas al ancho disponible (bbox extendido, mínimo 220px×escala),
+    # acotado además por `max_block_w` si el vecino más próximo está cerca. Si el vecino
+    # está tan pegado que `max_block_w` cae por debajo de un mínimo legible, se respeta
+    # ese mínimo (`min_floor`) y se acepta un posible solape residual como último recurso
+    # — degradación elegante en escenas muy apiñadas en vez de píldoras ilegibles.
+    default_floor = int(220 * s)
+    min_floor = int(100 * s)
+    avail_w = max(default_floor, min(fw - 8, (x2 - x1) + int(160 * s)))
+    if max_block_w is not None:
+        avail_w = min(avail_w, max(max_block_w, min_floor))
     rows: list[list[tuple]] = [[]]
     row_w = 0
     for key, text, tw, th in measured:
@@ -930,7 +925,49 @@ def draw_person_chips(frame: np.ndarray, x1: int, y1: int, x2: int, y2: int,
     if by + block_h > fh - 4:
         by = max(4, fh - block_h - 4)
 
-    # Capa RGBA para todas las píldoras del bloque (un solo composite sobre el ROI).
+    return {
+        "rows": rows, "chip_h": chip_h, "block_w": block_w, "block_h": block_h,
+        "bx": bx, "by": by, "font": font, "font_size": font_size,
+        "pad_x": pad_x, "pad_y": pad_y, "gap": gap, "radius": radius, "s": s,
+    }
+
+
+def _rects_overlap(a, b) -> bool:
+    return a[0] < b[2] and a[2] > b[0] and a[1] < b[3] and a[3] > b[1]
+
+
+def _resolve_chip_collisions(blocks: list[dict], fh: int) -> None:
+    """Red de seguridad tras el ancho acotado por vecino: si dos bloques todavía se
+    solapan (ej. bboxes de personas abrazadas/solapadas), empuja el más tardío hacia
+    abajo lo mínimo necesario, con clamp al borde del frame. Muta `by` in-place.
+    Procesa en orden de lectura (arriba→abajo, izquierda→derecha) para un apilado
+    estable y determinista.
+    """
+    order = sorted(range(len(blocks)), key=lambda i: (blocks[i]["by"], blocks[i]["bx"]))
+    placed: list[tuple[int, int, int, int]] = []
+    for i in order:
+        b = blocks[i]
+        bx, by, bw, bh = b["bx"], b["by"], b["block_w"], b["block_h"]
+        rect = (bx, by, bx + bw, by + bh)
+        for pr in placed:
+            if _rects_overlap(rect, pr):
+                new_by = pr[3] + max(2, b["gap"])
+                if new_by + bh <= fh - 4:
+                    by = new_by
+                    rect = (bx, by, bx + bw, by + bh)
+        b["by"] = by
+        placed.append(rect)
+
+
+def _render_chip_block(frame: np.ndarray, block: dict, fade_alpha: float) -> np.ndarray:
+    """Dibuja un bloque de píldoras ya posicionado (capa RGBA, un solo composite)."""
+    fh, fw = frame.shape[:2]
+    bx, by = block["bx"], block["by"]
+    block_w, block_h, chip_h = block["block_w"], block["block_h"], block["chip_h"]
+    pad_x, gap, radius = block["pad_x"], block["gap"], block["radius"]
+    font, font_size = block["font"], block["font_size"]
+    opacity = float(VISUALIZATION.get("chip_opacity", 0.82)) * max(0.0, min(1.0, fade_alpha))
+
     rx1, ry1 = bx, by
     rx2, ry2 = min(fw, bx + block_w + 2), min(fh, by + block_h + 2)
     if rx2 <= rx1 or ry2 <= ry1:
@@ -939,7 +976,7 @@ def draw_person_chips(frame: np.ndarray, x1: int, y1: int, x2: int, y2: int,
     draw = ImageDraw.Draw(layer)
 
     cy = 0
-    for row in rows:
+    for row in block["rows"]:
         cx = 0
         for key, text, cw in row:
             fill = CATEGORY_COLORS.get(key, (200, 200, 200))
@@ -963,6 +1000,73 @@ def draw_person_chips(frame: np.ndarray, x1: int, y1: int, x2: int, y2: int,
     roi = frame[ry1:ry2, rx1:rx2].astype(np.float32)
     frame[ry1:ry2, rx1:rx2] = (rgb * alpha + roi * (1.0 - alpha)).astype(np.uint8)
     return frame
+
+
+def draw_all_person_chips(frame: np.ndarray, entries: list[dict], fade_alpha: float = 1.0) -> np.ndarray:
+    """Dibuja las píldoras de TODAS las personas de un frame en un layout de 2 fases
+    para que los bloques de personas distintas no se solapen entre sí.
+
+    `entries`: lista de dicts con `x1,y1,x2,y2,attrs` (uno por persona detectada en el
+    frame). Fase 1: cada bloque se calcula acotando su ancho al vecino más próximo a la
+    derecha ("lane capping") para no invadir su columna. Fase 2: `_resolve_chip_collisions`
+    actúa de red de seguridad para solapes residuales (bboxes solapados/abrazos). Fase 3:
+    se renderizan todos los bloques ya posicionados.
+    """
+    if fade_alpha <= 0.02 or not PIL_AVAILABLE:
+        return frame
+    if not entries:
+        return frame
+
+    fh, fw = frame.shape[:2]
+    s = _annotation_scale(fh)
+    margin = int(round(VISUALIZATION.get("chip_gap", 5) * s)) * 2 + int(round(10 * s))
+
+    xs1 = [int(e["x1"]) for e in entries]
+    blocks: list[dict] = []
+    for i, e in enumerate(entries):
+        x1_i = xs1[i]
+        right_neighbors = [xj for j, xj in enumerate(xs1) if j != i and xj > x1_i]
+        max_block_w = (min(right_neighbors) - x1_i - margin) if right_neighbors else None
+        block = _layout_person_chip_block(
+            fh, fw, e["x1"], e["y1"], e["x2"], e["y2"], e["attrs"],
+            max_block_w=max_block_w,
+        )
+        if block is not None:
+            blocks.append(block)
+
+    if not blocks:
+        return frame
+
+    _resolve_chip_collisions(blocks, fh)
+
+    for block in blocks:
+        frame = _render_chip_block(frame, block, fade_alpha)
+    return frame
+
+
+def draw_person_chips(frame: np.ndarray, x1: int, y1: int, x2: int, y2: int,
+                      track_id, person_color: tuple,
+                      attrs: list[tuple[str, str]], fade_alpha: float = 1.0) -> np.ndarray:
+    """Dibuja las clases de una persona como píldoras redondeadas flotantes.
+
+    Las píldoras se disponen en filas (flow-wrap) preferentemente encima del bbox;
+    si no caben arriba, debajo. Cada píldora usa el color de su categoría
+    (CATEGORY_COLORS) con `chip_opacity` y texto oscuro. Sin cabecera de ID.
+    `fade_alpha` atenúa el conjunto (fade-in por escena). `person_color` se conserva
+    en la firma por compatibilidad pero ya no se usa (las esquinas son blancas fijas).
+
+    Wrapper de una sola persona sobre `draw_all_person_chips` — para dibujar varias
+    personas del mismo frame sin que sus bloques se solapen, usar
+    `draw_all_person_chips` directamente con la lista completa de personas.
+    """
+    if not PIL_AVAILABLE:
+        # Fallback mínimo: caja de esquinas, sin píldoras
+        return draw_corner_bbox(frame, x1, y1, x2, y2,
+                                VISUALIZATION.get("corner_color", (255, 255, 255)),
+                                VISUALIZATION.get("corner_bracket_thickness", 3),
+                                VISUALIZATION.get("corner_bracket_len", 20), fade_alpha)
+    entry = {"x1": x1, "y1": y1, "x2": x2, "y2": y2, "attrs": attrs}
+    return draw_all_person_chips(frame, [entry], fade_alpha=fade_alpha)
 
 
 def draw_detection_with_info(frame: np.ndarray, box, track_id: int | None = None,

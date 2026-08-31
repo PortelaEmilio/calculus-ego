@@ -59,6 +59,20 @@ _BODY_WEIGHT_SYNONYMS = {
     "underweight": "thin", "skinny": "thin", "lean": "thin", "slim": "thin", "light": "thin",
     "normal": "median", "average": "median", "healthy": "median",
 }
+# Reetiquetado a ADIPOSITY (2026-07-22): el clasificador mide grasa corporal (el prompt
+# ya define la tarea como "body fatness"). El modelo SIGUE emitiendo los tokens calibrados
+# (light build/median/overweight) — la palabra exacta es crítica (ver CLAUDE.md) — pero el
+# valor canónico que se persiste en el campo interno `body_weight` es la clase de adiposidad
+# low/medium/high. Es una biyección con thin/median/overweight (κ invariante). El nombre del
+# campo interno `body_weight` se conserva; solo cambia el vocabulario del VALOR.
+_ADIPOSITY_MAP = {"thin": "low", "median": "medium", "overweight": "high", "obese": "high"}
+
+
+def _to_adiposity(canon: str | None) -> str | None:
+    """Traduce la clase canónica de peso a adiposidad (low/medium/high). 'not visible'/None pasan igual."""
+    if canon is None:
+        return None
+    return _ADIPOSITY_MAP.get(canon, canon)
 # Musculatura visible (binaria). Se comprueba el NEGATIVO primero: "visible" es
 # substring de "not visible" (mismo caso que female/male en _parse_gender).
 VALID_MUSCLES = (
@@ -179,8 +193,9 @@ def _parse_body_weight(text: str) -> str | None:
         return 'not visible'
     hit = next((w for w in VALID_BODY_WEIGHTS if w in raw), None)
     if hit:
-        return hit
-    return next((canon for syn, canon in _BODY_WEIGHT_SYNONYMS.items() if syn in raw), None)
+        return _to_adiposity(hit)
+    syn = next((canon for syn, canon in _BODY_WEIGHT_SYNONYMS.items() if syn in raw), None)
+    return _to_adiposity(syn)
 
 
 def _parse_muscle(text: str) -> str | None:

@@ -32,7 +32,7 @@ from config import (
 )
 from utils.visualization import (
     put_text_pil, draw_skeleton, draw_detection_with_info, save_person_crop,
-    draw_corner_bbox, draw_person_chips, build_person_display_attrs,
+    draw_corner_bbox, draw_all_person_chips, build_person_display_attrs,
     render_person_annotated_crop, save_person_annotated_crop,
     is_waist_visible, is_shoulder_visible, is_frontal_pose_with_waist, has_five_face_keypoints_visible,
     extract_face_crop, get_color_for_track_id, count_visible_keypoints, draw_scene_number,
@@ -125,27 +125,6 @@ def _iou_xyxy(a: tuple, b: tuple) -> float:
     area_b = max(0, bx2 - bx1) * max(0, by2 - by1)
     union = area_a + area_b - inter
     return inter / union if union > 0 else 0.0
-
-
-def _shoulders_below_eyes(kpts):
-    """Distancia vertical ojos→hombros normalizada por distancia inter-ocular.
-    Señal de elevación de cámara (picado): en un picado los hombros se escorzan
-    hacia la cámara y se proyectan MÁS cerca de la cabeza → valor pequeño.
-    kpts: array COCO (17,3) [x,y,conf]. Devuelve float o None si faltan keypoints.
-    Usado por el gate de pose de demand/submission (ver config.ENABLE_SUBMISSION_POSE_GATE)."""
-    if kpts is None or len(kpts) < 7:
-        return None
-    conf = getattr(config, "SUBMISSION_SBE_PART_CONF", 0.3)
-    try:
-        if not all(float(kpts[i][2]) >= conf for i in (1, 2, 5, 6)):
-            return None
-        eye_y = (float(kpts[1][1]) + float(kpts[2][1])) / 2.0
-        sh_y = (float(kpts[5][1]) + float(kpts[6][1])) / 2.0
-        ioc = ((float(kpts[1][0]) - float(kpts[2][0])) ** 2
-               + (float(kpts[1][1]) - float(kpts[2][1])) ** 2) ** 0.5
-    except (IndexError, TypeError, ValueError):
-        return None
-    return (sh_y - eye_y) / ioc if ioc > 1e-3 else None
 
 
 def annotate_frame(frame: np.ndarray, results_detect, results_pose,
@@ -260,6 +239,11 @@ def annotate_frame(frame: np.ndarray, results_detect, results_pose,
     pose_boxes = None
     if ENABLE_POSE_ESTIMATION and results_pose and results_pose[0].boxes is not None and len(results_pose[0].boxes) > 0:
         pose_boxes = results_pose[0].boxes
+
+    # Píldoras de atributos ("chips") de TODAS las personas del frame, acumuladas
+    # durante el bucle por persona y dibujadas juntas al final (draw_all_person_chips)
+    # para que el layout evite solapes entre bloques de personas distintas.
+    chip_entries = []
 
     if has_detect_boxes or pose_boxes is not None:
         boxes = results_detect[0].boxes if has_detect_boxes else None
@@ -660,20 +644,11 @@ def annotate_frame(frame: np.ndarray, results_detect, results_pose,
                         "age_group": cached_age["age_group"],
                     })
 
-            # Gate de pose para demand/submission (PROD 2026-06-29, híbrido):
-            # gemma4 es ciego a la elevación de cámara y lee los picados como
-            # demand/affiliation. Si los hombros están escorzados hacia la cámara
-            # (shoulders_below_eyes < umbral) reescribimos a demand/submission.
-            if (getattr(config, "ENABLE_SUBMISSION_POSE_GATE", False)
-                    and behaviour_info and behaviour_info.get("success")
-                    and behaviour_info.get("behaviour") == "demand/affiliation"):
-                _sbe = _shoulders_below_eyes(kpts)
-                if _sbe is not None and _sbe < getattr(config, "SUBMISSION_SBE_THRESHOLD", 2.88):
-                    behaviour_info["behaviour"] = "demand/submission"
-                    behaviour_info["raw_response"] = (
-                        (behaviour_info.get("raw_response") or "")
-                        + f" | pose_gate: sbe={_sbe:.2f} < {getattr(config, 'SUBMISSION_SBE_THRESHOLD', 2.88)} -> demand/submission"
-                    )
+            # (2026-07-27) Aquí vivía el gate de pose que reescribía
+            # demand/affiliation → demand/submission cuando shoulders_below_eyes < 2.88.
+            # ELIMINADO: medía postura encorvada, no elevación de cámara (sample 500 de
+            # IG: 16 de 21 submissions falsas). Ahora la clase la emite el VLM desde el
+            # prompt (`prompts_qwen3` VH), igual en imagen y en vídeo.
 
             # Guardar clasificaciones de comportamiento
             if behaviour_info and behaviour_info.get("success"):
@@ -900,16 +875,21 @@ def annotate_frame(frame: np.ndarray, results_detect, results_pose,
                     VISUALIZATION.get("corner_bracket_thickness", 3),
                     VISUALIZATION.get("corner_bracket_len", 20), fade_alpha,
                 )
-                annotated = draw_person_chips(
-                    annotated, bx1, by1, bx2, by2, track_id, person_color,
-                    attrs, fade_alpha=fade_alpha,
-                )
+                chip_entries.append({
+                    "x1": bx1, "y1": by1, "x2": bx2, "y2": by2,
+                    "track_id": track_id, "person_color": person_color, "attrs": attrs,
+                })
             else:
                 annotated = draw_detection_with_info(
                     annotated, box, track_id, beauty_score, gender_info, age_info,
                     behaviour_info, activity_info, body_display_info, location_info, body_shape_info, accessory_info, social_distance_info,
                     person_color=person_color, occupancy=occupancy
                 )
+
+    # Dibujar las píldoras de TODAS las personas juntas (tras conocer a todo el mundo)
+    # para que el layout pueda evitar que los bloques de personas distintas se solapen.
+    if chip_entries:
+        annotated = draw_all_person_chips(annotated, chip_entries, fade_alpha=fade_alpha)
 
     # Dibujar esqueletos
     if ENABLE_POSE_ESTIMATION:
@@ -1451,6 +1431,27 @@ def process_image(image_path: Path, model_detect, model_pose,
         total_scenes=1,
         output_basename=image_path.stem,
     )
+
+    # ── Ubicación de la ESCENA cuando NO hay personas (2026-08-31) ──────────
+    # Sin detecciones el bucle por persona no corre y `location_classifications`
+    # sale vacía → la fila del xlsx quedaba con `IA Ubic.` en blanco (main.py, rama
+    # n == 0). Aquí se lanza UNA llamada sobre el frame COMPLETO con el prompt sin
+    # TARGET. Va en `process_image` y NO en `annotate_frame` a propósito: `video.py`
+    # llama a `annotate_frame` por frame con los clasificadores a None solo para
+    # renderizar, y ahí no debe dispararse ninguna inferencia.
+    if (stats['num_persons'] == 0
+            and ENABLE_LOCATION_CLASSIFICATION
+            and getattr(config, "ENABLE_SCENE_LOCATION_NO_PERSON", True)
+            and scene_context_classifier is not None):
+        scene_loc = scene_context_classifier.classify_location_only(img)
+        if scene_loc and scene_loc.get("success"):
+            stats['location_classifications'].append({
+                "track_id": None,          # entrada de ESCENA, no de persona
+                "frame": 0,
+                "scene_level": True,
+                "location": scene_loc.get("location"),
+                "raw_response": scene_loc.get("raw_response"),
+            })
 
     num_keypoints = 0
     if ENABLE_POSE_ESTIMATION and results_pose[0].keypoints is not None:

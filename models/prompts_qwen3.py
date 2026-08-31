@@ -12,16 +12,28 @@ downstream y el ground truth no cambian. La salida JSON la aplana a `Label: valu
 backend-proxy externo (ver scratchpad `experimento_json.py`) ANTES de llegar a los
 parsers line-based, así que este módulo solo define los prompts.
 
+2026-07-27 — variante "VH": `demand/submission` vuelve al closed-set de behaviour, descrita por
+TIPO DE PLANO ("a HIGH-ANGLE SHOT … picado", con el contrapicado excluido explícitamente). Sustituye
+al gate de pose post-VLM, que se ELIMINÓ de `processing/image.py` porque medía postura encorvada y no
+elevación de cámara (en el sample 500 de IG: 16 de 21 submissions falsas, precisión 24%). VH mide
+22/24 con 0 falsos positivos en el banco FLUX de comportamiento. Con esto vídeo también puede emitir
+la clase (el gate solo existía en el path de imagen). Ver el informe del experimento en
+`validacion_imagenes/datos-sinteticos/flux/edad_genero_cat/resultados_submission_prompt/`.
+
+2026-08-31 — ubicación SIN persona: nuevo `build_location_only_prompt()` para imágenes y escenas de
+vídeo donde YOLO no detecta a nadie (capturas de tuit, tarjetas de texto, paisajes). El prompt de
+escena no vale ahí porque afirma que hay una persona en una caja amarilla. Las 4 viñetas de pistas
+se comparten vía `_LOCATION_CUES`, así que `_LOCATION_DEF` (el path CON persona) queda byte-idéntico.
+
 API expuesta (idéntica a prompts_ollama_cot / prompts_gemma4_official):
     - build_person_attrs_prompt(include_body_shape: bool) -> str
     - build_scene_prompt(include_social_distance: bool) -> str
-    - SCENE_PROMPT
+    - build_location_only_prompt() -> str        (imágenes/escenas SIN personas)
+    - SCENE_PROMPT / LOCATION_ONLY_PROMPT
     - SOCIAL_DISTANCE_PROMPT
     - PROMPT_VERSION
 """
 from typing import Final
-
-PROMPT_VERSION: Final = "qwen3_attire_20260708"
 
 # Social distance: JSON de partes-visibles que `social_distance.py:_map_parts_to_category()`
 # parsea por su cuenta. El proxy JsonFlatteningBackend NO lo toca (solo aplana person_attrs/scene).
@@ -51,6 +63,8 @@ FRAMING (only matters when the full body is visible — feet=1):
 Output EXACTLY one line of valid JSON, NOTHING ELSE — no preamble, no explanation, no reasoning, no thinking tags, no commentary:
 {"head": 0|1, "shoulders": 0|1, "chest": 0|1, "waist": 0|1, "legs": 0|1, "feet": 0|1, "frame_filled": 0|1}
 """
+
+PROMPT_VERSION: Final = "qwen3_scene_location_20260831"
 
 
 # ===========================================================================
@@ -88,12 +102,12 @@ _AGE_DEF: Final = """age — life stage read from the visible face, skin, and ha
 - na: only when the face/skin is genuinely not assessable at all (face entirely hidden, fully covered, or too blurred).
 Indicators: skin texture and hair colour only. Body size, frame, muscles, beard, or jawline are NOT aging cues. If skin is smooth and lacks wrinkles, default to 'youth'. Do not use 'na' if any skin is visible."""
 
-_BEHAVIOUR_DEF: Final = """behaviour — gaze and head configuration toward the viewer.
+_BEHAVIOUR_DEF: Final = """behaviour — gaze and head configuration toward the viewer, plus the shot type.
 - demand/affiliation: head frontal or slightly turned, both pupils visible and pointing at the camera lens, neutral/friendly engagement.
 - demand/seduction: head frontal/slight, pupils at the lens, PLUS at least two seductive cues (parted/pouty lips, heavy-lidded sultry eyes, arched/suggestive body tilt, flirtatious smile, hand sensually near lips/hair/neck, skin deliberately exposed). An intense or tough stare alone is NOT seduction.
+- demand/submission: a HIGH-ANGLE SHOT (also called an overhead shot, a bird's-eye-view portrait, or "picado"): the camera is placed above the subject and tilted down, and the subject looks up into it. If you would caption this photo "shot from a high angle" or "photographed from above", it is demand/submission. A LOW-ANGLE shot (from below, "contrapicado") is NOT submission.
 - offer/ideal: head in strong profile / strongly turned / back of head, OR pupils NOT at the lens (looking down/up/sideways, eyes closed/shadowed/covered, face too small or blurred to resolve the pupils).
-Indicators: head angle and pupil direction. If you cannot clearly see both pupils pointing at the lens, it is offer/ideal.
-NOTE: do NOT try to detect high-angle/overhead viewpoints — that case (demand/submission) is decided later from body pose, not by you. Just classify by gaze as above."""
+Indicators: head angle, pupil direction, and the shot type."""
 
 _BODY_DISPLAY_DEF: Final = """bodydisplay — how much the body is exposed. Decide in THIS order and assign the FIRST class that fits:
 1) partially naked (check FIRST) — Wearing ONLY swimwear/underwear, or has a completely bare chest, bare torso, or bare midriff (exposed belly). * CRITICAL: Bare arms, bare shoulders, or tank tops/sleeveless shirts do NOT count here (they belong to category 3).
@@ -139,7 +153,7 @@ _PA_OUTPUT: Final = """Output ONLY this JSON object, nothing else (no prose, no 
 {
   "gender":      {"class": "<male|female|na>", "features": ["<short visual cue>"]},
   "age":         {"class": "<childhood|youth|adulthood|old age|na>", "features": ["<short visual cue>"]},
-  "behaviour":   {"class": "<demand/affiliation|demand/seduction|offer/ideal>", "features": ["<short visual cue>"]},
+  "behaviour":   {"class": "<demand/affiliation|demand/seduction|demand/submission|offer/ideal>", "features": ["<short visual cue>"]},
   "bodydisplay": {"class": "<normal clothes|revealing clothes|partially naked|no clothes at all>", "features": ["<short visual cue>"]},
   "bodyweight":  {"class": "<light build|median|overweight|not visible>"},
   "muscle":      {"class": "<visible|not visible>"},
@@ -191,12 +205,32 @@ _ACTIVITY_DEF: Final = """activity — the main action of the TARGET person.
 - other: a real activity beyond being photographed (eating, drinking, cooking, using a phone, chatting, walking, working, holding a baby/pet, dancing, singing, playing an instrument, traveling). ALSO use other when the TARGET is too small, distant, blurred, or back-turned to identify the action.
 Indicators: what the TARGET is doing. A TARGET in the background or too small to read → other (never default to posing). Avatars/portraits with a person posed for the camera → posing."""
 
-_LOCATION_DEF: Final = """location — where the TARGET person is.
-- indoors: inside any enclosed/built environment. Cues: walls, doors, windows, ceiling, furniture (bed, sofa, chair, table, desk, shelf), bedding/curtains, kitchen/bathroom fixtures, indoor flooring, interior lighting, vehicle interiors, any built venue.
+# Las 4 viñetas de pistas se comparten entre el prompt CON persona (`_LOCATION_DEF`, que
+# ancla la ubicación al TARGET) y el prompt SIN persona (`_LOCATION_DEF_NOPERSON`, para
+# imágenes/escenas donde YOLO no detecta a nadie). El texto de las viñetas debe quedar
+# IDÉNTICO al histórico: tocarlo movería el κ 0.889 de Ubicación del sample 500.
+_LOCATION_CUES: Final = """- indoors: inside any enclosed/built environment. Cues: walls, doors, windows, ceiling, furniture (bed, sofa, chair, table, desk, shelf), bedding/curtains, kitchen/bathroom fixtures, indoor flooring, interior lighting, vehicle interiors, any built venue.
 - wilderness: natural outdoor setting. Cues: trees/foliage, sky/clouds/stars dominant, sea/river/lake, mountains/cliffs/rocks, sand/beach/dunes, desert/arid terrain, grass field, snow/ice.
 - city: urban outdoor setting. Cues: buildings/skyscrapers seen from outside, streets/sidewalks/asphalt, cars, traffic signs/lights, lampposts, billboards, monuments, public squares.
-- no background: the whole background is a flat colour, a simple gradient, a studio backdrop, a dark void with only text, or a seamless blur — no architectural, natural, or urban feature visible.
-Special case — avatar: if the TARGET sits inside a clear circular/oval profile-picture shape with a contrasting solid border, classify ONLY by what is inside that circle (ignore the rest of the image). You MUST pick one of the four values; there is no NA."""
+- no background: the whole background is a flat colour, a simple gradient, a studio backdrop, a dark void with only text, or a seamless blur — no architectural, natural, or urban feature visible."""
+
+_LOCATION_DEF: Final = (
+    "location — where the TARGET person is.\n"
+    + _LOCATION_CUES + "\n"
+    + """Special case — avatar: if the TARGET sits inside a clear circular/oval profile-picture shape with a contrasting solid border, classify ONLY by what is inside that circle (ignore the rest of the image). You MUST pick one of the four values; there is no NA."""
+)
+
+# Variante para imágenes/escenas SIN ninguna persona detectada (2026-08-31). Misma lista
+# de pistas y mismo closed-set, pero la tarea se formula sobre la imagen entera: sin caja
+# amarilla, "where the TARGET person is" no tiene referente. Se explicita que las tarjetas
+# de texto y las capturas (masivas en este corpus) son `no background`.
+_LOCATION_DEF_NOPERSON: Final = (
+    "location — where this photo was taken.\n"
+    + _LOCATION_CUES + "\n"
+    + "There is NO person to focus on: judge the setting from the image as a whole. A text "
+      "card, a screenshot of a post, a plain graphic, a logo, or a drawing with no scene "
+      "behind it is `no background`. You MUST pick one of the four values; there is no NA."
+)
 
 _SCENE_OUTPUT: Final = """Output ONLY this JSON object, nothing else (no prose, no markdown fences, no reasoning):
 {
@@ -222,3 +256,35 @@ def build_scene_prompt(include_social_distance: bool) -> str:
 
 
 SCENE_PROMPT: Final = build_scene_prompt(False)
+
+
+# ===========================================================================
+# Ubicación SIN persona (2026-08-31)
+# ===========================================================================
+# Cuando YOLO no detecta a nadie no hay caja amarilla que señalar, así que el
+# prompt de escena (que afirma "There is EXACTLY ONE person highlighted…") no es
+# aplicable. Esta variante pide SOLO la ubicación sobre la imagen completa. La
+# consume `scene_context.SceneContextClassifier.classify_location_only()`; el
+# proxy `JsonFlatteningBackend` aplana la clave `location` igual que en el
+# prompt de escena, así que el parser downstream (`_parse_location`) no cambia.
+
+_SCENE_ONLY_INTRO: Final = (
+    "This image contains NO highlighted person and no TARGET box. Classify the SETTING "
+    "of the image as a whole. Do NOT describe people, panels, or the text content — "
+    "report only where the photo was taken."
+)
+
+_LOCATION_ONLY_OUTPUT: Final = """Output ONLY this JSON object, nothing else (no prose, no markdown fences, no reasoning):
+{
+  "location": {"class": "<indoors|wilderness|city|no background>", "features": ["<short visual cue>"]}
+}"""
+
+
+def build_location_only_prompt() -> str:
+    """Prompt de ubicación para imágenes/escenas SIN ninguna persona detectada."""
+    return "\n\n".join([
+        _NOREASON_PREAMBLE, _SCENE_ONLY_INTRO, _LOCATION_DEF_NOPERSON, _LOCATION_ONLY_OUTPUT,
+    ])
+
+
+LOCATION_ONLY_PROMPT: Final = build_location_only_prompt()

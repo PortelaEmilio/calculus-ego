@@ -112,7 +112,7 @@ def extract_results_for_csv(result, content_type):
             'ia_actividad': None,
             'ia_exposicion_cuerpo': None,
             'ia_ubicacion': None,
-            'ia_peso_corporal': None,
+            'ia_adiposity': None,
             'ia_distancia_social': None,
             'ia_belleza_media': None,
             'ia_ocupacion_media': None,
@@ -197,9 +197,9 @@ def extract_results_for_csv(result, content_type):
         if all_body_shapes:
             # silueta ELIMINADA 2026-07-04 → distribución de PESO corporal
             bsc = Counter(b.get('body_weight', '') for b in all_body_shapes)
-            data['ia_peso_corporal'] = json.dumps(dict(bsc), ensure_ascii=False)
+            data['ia_adiposity'] = json.dumps(dict(bsc), ensure_ascii=False)
         else:
-            data['ia_peso_corporal'] = None
+            data['ia_adiposity'] = None
 
         if all_accessories:
             for cat, col_name in ACCESSORY_CSV_COLUMNS.items():
@@ -280,9 +280,9 @@ def extract_results_for_csv(result, content_type):
         bsc = result.get('body_shape_classifications', [])
         if bsc:
             bs_counts = Counter(b.get('body_weight', '') for b in bsc)
-            data['ia_peso_corporal'] = json.dumps(dict(bs_counts), ensure_ascii=False)
+            data['ia_adiposity'] = json.dumps(dict(bs_counts), ensure_ascii=False)
         else:
-            data['ia_peso_corporal'] = None
+            data['ia_adiposity'] = None
 
         acc = result.get('accessory_classifications', [])
         if acc:
@@ -365,9 +365,9 @@ def extract_results_for_csv(result, content_type):
 
         bss = result.get('body_shape_statistics', {})
         if bss and bss.get('body_weight_distribution'):
-            data['ia_peso_corporal'] = json.dumps(bss['body_weight_distribution'], ensure_ascii=False)
+            data['ia_adiposity'] = json.dumps(bss['body_weight_distribution'], ensure_ascii=False)
         else:
-            data['ia_peso_corporal'] = None
+            data['ia_adiposity'] = None
 
         accs = result.get('accessory_statistics', {})
         acc_dist = accs.get('accessory_distribution', {}) if accs else {}
@@ -411,7 +411,7 @@ def extract_results_for_csv(result, content_type):
         data['ia_actividad'] = None
         data['ia_exposicion_cuerpo'] = None
         data['ia_ubicacion'] = None
-        data['ia_peso_corporal'] = None
+        data['ia_adiposity'] = None
         data['ia_distancia_social'] = None
         data['ia_belleza_media'] = None
         data['ia_ocupacion_media'] = None
@@ -590,7 +590,7 @@ def process_batch(csv_path, sample_size=400, multimedia_dir=None, output_csv=Non
     new_columns = [
         'ia_n_personas', 'ia_avg_personas_frame', 'ia_genero', 'ia_edad',
         'ia_comportamiento', 'ia_actividad', 'ia_exposicion_cuerpo',
-        'ia_ubicacion', 'ia_peso_corporal',
+        'ia_ubicacion', 'ia_adiposity',
         *list(ACCESSORY_CSV_COLUMNS.values()),
         'ia_distancia_social', 'ia_belleza_media',
         'ia_ocupacion_media', 'ia_ocupacion_max', 'ia_ocr_texto',

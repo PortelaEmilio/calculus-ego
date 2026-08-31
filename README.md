@@ -18,14 +18,18 @@ Per detected person:
 - **Behaviour** — visual social semiotics (demand/affiliation, demand/seduction, demand/submission, offer/ideal)
 - **Activity** — sports / romance / posing / other
 - **Body display** — normal clothes / revealing clothes / partially naked / no clothes at all
-- **Location** — indoors / wilderness / city / no background
-- **Weight** — thin / median / overweight
+- **Location** — indoors / wilderness / city / no background. Also classified for images and
+  video scenes with **no detected person** (text cards, screenshots, landscapes), via a
+  location-only prompt over the whole frame
+- **Adiposity** — low / medium / high (body fatness)
+- **Attire** — underwear/swimwear / sportswear / uniform / formal / casual / not visible
+  (style and formality, orthogonal to body display)
 - **Musculature** — visible / not visible
 - **Social distance** — proxemic distance (Hall): intimate → public
 - **Size** — how much of the frame the person occupies: bounding-box area as a percentage of the frame, plus the raw bbox area (px) and its `[x1,y1,x2,y2]` coordinates
 - **Accessories** (multi-label) — makeup, tattoos, bags, belts, jewelry, headwear, eyewear
 - **Beauty** *(optional)* — facial attractiveness on a continuous 1–10 scale (one decimal),
-  scored in a deferred pass over `demand/*` faces (see [Beauty](#beauty-optional))
+  scored in a deferred pass over every sufficiently large face (see [Beauty](#beauty-optional))
 
 Plus **OCR** of any text in the image.
 
@@ -40,17 +44,20 @@ YOLO26 detection + pose  ──►  per-person crops + keypoints
       ▼
 Qwen3.5-9B (Transformers)  ──►  2 merged VLM calls per person
       │                          · person attributes (gender, age, behaviour,
-      │                            body display, weight, musculature, accessory)
+      │                            body display, adiposity, musculature, attire,
+      │                            accessory)
       │                          · scene context (activity, location)
       ▼
 JSON + CSV per-person classifications
 ```
 
 Social distance is **deterministic from pose keypoints** (proxemic mapping from
-the lowest visible body part + bbox size); `demand/submission` behaviour is
-decided by a **pose gate** (camera-elevation read from shoulder-vs-eye geometry),
-not by the VLM. A `BBOX_MIN_FRAME_RATIO` gate drops detections too small for the
-VLM to read; each person's **size/occupancy** is read straight from that bounding
+the lowest visible body part + bbox size). `demand/submission` is emitted by the
+VLM from the prompt, which describes it as a high-angle shot; it used to be
+decided by a pose gate on shoulder-vs-eye geometry, but that gate measured
+hunched posture rather than camera elevation (24% precision on a 500-image
+Instagram sample) and was removed. A `BBOX_MIN_FRAME_RATIO` gate drops detections
+too small for the VLM to read; each person's **size/occupancy** is read straight from that bounding
 box (no VLM). Everything is greedy + seeded for reproducibility.
 
 | Path | File |
@@ -65,6 +72,8 @@ box (no VLM). Everything is greedy + seeded for reproducibility.
 | Prompts | `models/prompts_qwen3.py` |
 | VLM backend | `models/qwen35_vlm_backend.py` (+ `models/backends/json_flatten_backend.py`) |
 | Annotation / visualization | `utils/visualization.py` |
+| Deferred beauty pass (standalone) | `beauty_pass.py` |
+| Scene-location backfill for finished runs | `scene_location_backfill.py` |
 
 ## Requirements
 
@@ -118,8 +127,10 @@ model instead of loading a second copy.
 
 A continuous **1–10 facial-attractiveness** estimator (one decimal) runs as a
 **deferred pass**: after the classifiers finish, a `Qwen3.5-9B` (4-bit) model
-with a LoRA adapter scores **only the faces whose behaviour is `demand/*`**
-(linked to phase-1 detections by IoU). Output is the decimal column
+with a LoRA adapter scores every face with at least
+`BEAUTY_MIN_FACE_KEYPOINTS` visible facial keypoints and a head crop of at least
+`BEAUTY_MIN_HEAD_PX` pixels (that size floor keeps the crop inside the training
+distribution; small faces are skipped rather than anchored low). Output is the decimal column
 `IA Belleza (1-10)` (per-person in `manual`, a `*_belleza.xlsx` sidecar in
 `batch`, printed in `single`).
 
@@ -132,8 +143,8 @@ with a LoRA adapter scores **only the faces whose behaviour is `demand/*`**
   `accelerate`). With Git LFS: `git lfs install` before cloning (or
   `git lfs pull` after).
 - **Toggle.** On by default (`config.ENABLE_BEAUTY_PASS`); skip per run with
-  `--no-beauty`. Degrades gracefully: if the adapter is missing or there are no
-  `demand/*` faces, the run finishes without the beauty column instead of failing.
+  `--no-beauty`. Degrades gracefully: if the adapter is missing or no face passes
+  the gates, the run finishes without the beauty column instead of failing.
 
 ### How the adapter was trained
 

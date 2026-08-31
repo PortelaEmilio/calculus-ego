@@ -56,7 +56,7 @@ FINAL_COLS = [
     "Img. orig.", "Img. anot.", "Estado",
     "IA Nº pers.", "IA Tamaño (%)", "IA BBox px", "IA BBox xyxy",
     "IA Gen.", "IA Edad", "IA Comport.", "IA Activ.",
-    "IA Exp. Cp.", "IA Ubic.", "IA Peso", "IA Musculatura", "IA Vestimenta", "IA Dist. Soc.", "IA Belleza (1-10)",
+    "IA Exp. Cp.", "IA Ubic.", "IA Adiposity", "IA Musculatura", "IA Vestimenta", "IA Dist. Soc.", "IA Belleza (1-10)",
     "IA Maquill.", "IA Tattoos", "IA Bolsos", "IA Cints.", "IA Joyas", "IA Sombr.", "IA Gafas",
     "Valid.", "Revisor", "Notas",
     "Run ID", "Join ID", "Img ID", "Archivo", "Pers. Idx", "Pers. Key",
@@ -93,7 +93,30 @@ def build_video_rows(run_id, img_id, img_path, result, json_path):
     for scene in scenes:
         label = scene.get("scene_label")
         frame_path = scene.get("frame_path")
-        for p in scene.get("persons", []):
+        scene_persons = scene.get("persons") or []
+        # Escena SIN personas (2026-08-31): la Fase B ya no la descarta, clasifica solo
+        # la ubicación sobre el frame → una fila con `IA Ubic.` y las rutas de revisión.
+        if not scene_persons:
+            rows.append({
+                "Estado":        "ok",
+                "IA Nº pers.":   n_tracks,
+                "IA Ubic.":      scene.get("location"),
+                "Valid.": None, "Revisor": None, "Notas": None,
+                "Run ID":    run_id,
+                "Join ID":   f"{img_id}__{label}__none",
+                "Img ID":    img_id,
+                "Archivo":   Path(img_path).name,
+                "Pers. Idx": None,
+                "Pers. Key": None,
+                "Ruta Img.": str(img_path),
+                "Ruta JSON": str(json_path),
+                "Proc. At":  datetime.now().isoformat(),
+                "Scene":      label,
+                "Crop Path":  None,
+                "Frame Path": frame_path,
+            })
+            continue
+        for p in scene_persons:
             acc = p.get("accessories") or {}
             row = {
                 "Estado":        "ok",
@@ -107,7 +130,7 @@ def build_video_rows(run_id, img_id, img_path, result, json_path):
                 "IA Activ.":     p.get("activity"),
                 "IA Exp. Cp.":   p.get("body_display"),
                 "IA Ubic.":      p.get("location"),
-                "IA Peso":       p.get("weight"),
+                "IA Adiposity":  p.get("weight"),
                 "IA Musculatura": p.get("muscle"),
                 "IA Vestimenta": p.get("attire"),
                 "IA Dist. Soc.": p.get("social_distance"),
@@ -152,13 +175,21 @@ def build_rows(run_id, img_id, img_path, result, json_path):
     vlm_status = result.get("vlm_status") or "ok"
 
     if n == 0:
+        # Ubicación de ESCENA (2026-08-31): con 0 personas no hay entradas por track,
+        # pero `process_image` sí anota una entrada de escena con track_id=None
+        # (ENABLE_SCENE_LOCATION_NO_PERSON). Sin ella la celda queda vacía, como antes.
+        scene_loc = next(
+            (l for l in (result.get("location_classifications") or [])
+             if l.get("track_id") is None), None)
         rows.append({
             "Img. orig.":  None,
             "Img. anot.":  None,
             "Estado":      vlm_status,
             "IA Nº pers.": n_yolo,
             "IA Gen.": None, "IA Edad": None, "IA Comport.": None, "IA Activ.": None,
-            "IA Exp. Cp.": None, "IA Ubic.": None, "IA Dist. Soc.": None,
+            "IA Exp. Cp.": None,
+            "IA Ubic.":    scene_loc.get("location") if scene_loc else None,
+            "IA Dist. Soc.": None,
             "IA Maquill.": None, "IA Tattoos": None, "IA Bolsos": None, "IA Cints.": None,
             "IA Joyas": None, "IA Sombr.": None, "IA Gafas": None,
             "Valid.": None, "Revisor": None, "Notas": None,
@@ -212,7 +243,7 @@ def build_rows(run_id, img_id, img_path, result, json_path):
             "IA Activ.":      act.get("activity")      if act  else None,
             "IA Exp. Cp.":    bdis.get("body_display") if bdis else None,
             "IA Ubic.":       loc.get("location")      if loc  else None,
-            "IA Peso":        bsh.get("body_weight")   if bsh  else None,
+            "IA Adiposity":   bsh.get("body_weight")   if bsh  else None,
             "IA Musculatura": bsh.get("muscle")        if bsh  else None,
             "IA Vestimenta":  bsh.get("attire")        if bsh  else None,
             "IA Dist. Soc.":  soc.get("category")      if soc  else None,
@@ -845,7 +876,17 @@ def _process_directory(args, models):
         except (OSError, ValueError):
             return True  # ilegible → re-detectar
         for sc in mp.get("scenes", []):
-            for p in sc.get("persons", []):
+            persons = sc.get("persons") or []
+            if not persons:
+                # Escena SIN personas (2026-08-31): su único input para la Fase B es el
+                # frame de escena, y `full_frames_dir` también se vacía al final de cada
+                # tanda. Si ya no está, re-detectar o se perdería la ubicación EN SILENCIO
+                # (mismo modo de fallo que los crops huérfanos).
+                ff = sc.get("frame_file")
+                if ff and not os.path.exists(ff):
+                    return True
+                continue
+            for p in persons:
                 cf = p.get("general_crop_file")
                 if cf and not os.path.exists(cf):
                     return True
@@ -1743,7 +1784,7 @@ def _render_result_summary(result, file_ext, image_extensions):
             (ENABLE_ACTIVITY_CLASSIFICATION,     "Actividad",         act,  'activity'),
             (ENABLE_BODY_DISPLAY_CLASSIFICATION, "Exposición cuerpo", bdis, 'body_display'),
             (ENABLE_LOCATION_CLASSIFICATION,     "Ubicación",         loc,  'location'),
-            (ENABLE_BODY_SHAPE_CLASSIFICATION,   "Peso",              bsh,  'body_weight'),
+            (ENABLE_BODY_SHAPE_CLASSIFICATION,   "Adiposity",         bsh,  'body_weight'),
             (ENABLE_BODY_SHAPE_CLASSIFICATION,   "Musculatura",       bsh,  'muscle'),
             (ENABLE_BODY_SHAPE_CLASSIFICATION,   "Vestimenta",        bsh,  'attire'),
             (ENABLE_SOCIAL_DISTANCE,             "Distancia social",  soc,  'category'),
@@ -1856,7 +1897,7 @@ def _render_result_summary(result, file_ext, image_extensions):
         (ENABLE_ACTIVITY_CLASSIFICATION,     "Actividad",         "activity_statistics",       "activity_distribution"),
         (ENABLE_BODY_DISPLAY_CLASSIFICATION, "Exposición cuerpo", "body_display_statistics",   "body_display_distribution"),
         (ENABLE_LOCATION_CLASSIFICATION,     "Ubicación",         "location_statistics",       "location_distribution"),
-        (ENABLE_BODY_SHAPE_CLASSIFICATION,   "Peso",              "body_shape_statistics",     "body_shape_distribution"),
+        (ENABLE_BODY_SHAPE_CLASSIFICATION,   "Adiposity",         "body_shape_statistics",     "body_shape_distribution"),
         (ENABLE_ACCESSORY_CLASSIFICATION,    "Accesorios",        "accessory_statistics",      "accessory_distribution"),
         (ENABLE_SOCIAL_DISTANCE,             "Distancia social",  "social_distance_statistics", "category_distribution"),
     ]

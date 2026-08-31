@@ -61,6 +61,13 @@ ENABLE_BEHAVIOUR_CLASSIFICATION = True # Clasificación de comportamiento (Deman
 ENABLE_ACTIVITY_CLASSIFICATION = True # Clasificación de actividades (entertaining, sports, romance, etc.)
 ENABLE_BODY_DISPLAY_CLASSIFICATION = True # Clasificación de exposición del cuerpo
 ENABLE_LOCATION_CLASSIFICATION = True # Clasificación de ubicación (indoors, wilderness, city)
+# Ubicación TAMBIÉN cuando NO hay personas (2026-08-31). Sin detecciones no hay TARGET
+# que resaltar, así que el prompt de escena no aplica: se lanza una llamada aparte con
+# `prompts_qwen3.build_location_only_prompt()` sobre el frame completo. Cubre imágenes
+# (process_image) y (sub)escenas de vídeo en los dos paths (video.py y video_validation.py),
+# que antes se descartaban enteras. Coste: +1 llamada VLM por imagen/escena sin personas.
+# False = comportamiento previo (esas filas salen con `IA Ubic.` vacía).
+ENABLE_SCENE_LOCATION_NO_PERSON = True
 ENABLE_BODY_SHAPE_CLASSIFICATION = True # Bloque body_shape → ahora transporta SOLO PESO + MUSCULATURA
 #   (la SILUETA se ELIMINÓ del repo el 2026-07-04: κ 0.306 en el sample 500 real, no se recuperó).
 #   Mantener True: peso/musculatura viajan aquí. El nombre "body_shape" se conserva por el esquema.
@@ -416,27 +423,25 @@ VLM_ENABLE_THINKING = False   # PROD 2026-06-29: prompts_gemma4_json son "no-rea
 #   "prompts_ollama_qwen35" → prompts para Qwen3.5-9B (thinking nativo)
 #   "prompts_gemma4_json"   → prompts JSON refinados no-reasoning (PRODUCCIÓN 2026-06-29)
 import os as _os_pm   # override por entorno para experimentos (p.ej. prompts_qwen3)
-VLM_PROMPT_MODULE = _os_pm.environ.get("VLM_PROMPT_MODULE") or "prompts_qwen3"   # PROD 2026-07-02 (Qwen3.5): fork de prompts_gemma4_json con submission→gate + sports-por-acción; requiere el proxy JsonFlatteningBackend (loader). Rollback: "prompts_gemma4_json" / "prompts_ollama_cot"
+VLM_PROMPT_MODULE = _os_pm.environ.get("VLM_PROMPT_MODULE") or "prompts_qwen3"   # PROD 2026-07-02 (Qwen3.5): fork de prompts_gemma4_json con sports-por-acción; desde 2026-07-27 incluye demand/submission en el prompt (variante VH) y el gate de pose se eliminó. Requiere el proxy JsonFlatteningBackend (loader). Rollback: "prompts_gemma4_json" / "prompts_ollama_cot"
 
 # ============================================================================
-# Transformers (Gemma-4 NF4): presupuesto de tokens de imagen y gate de pose
-# para demand/submission (híbrido comportamiento). PRODUCCIÓN 2026-06-29.
+# Transformers (Gemma-4 NF4): presupuesto de tokens de imagen
 # ============================================================================
 # Override escalar de max_soft_tokens (todas las tareas) — 560 cabe en 12 GB con
 # NF4; el default GEMMA_VISUAL_TOKENS (1120 person_attrs) OOMea. Solo afecta a
 # VLM_BACKEND="transformers"; Ollama lo ignora.
 VLM_MAX_SOFT_TOKENS = 560
 
-# Gate de pose para demand/submission: gemma4 es CIEGO a la elevación de cámara
-# (toda pista de ángulo satura), pero el picado SÍ está en la geometría de los
-# keypoints. Si el VLM dice demand/affiliation y los hombros están escorzados
-# hacia la cámara (shoulders_below_eyes < umbral), se reescribe a demand/submission.
-# Validado en el banco FLUX comportamiento: submission 0/6 → 6/6, global 50% → 95.8%.
-# ⚠️ Umbral calibrado con n=12 (gap submission≤2.81 / affiliation≥2.96). Ver CLAUDE.md
-# y [[behaviour-submission-pose-gate]].
-ENABLE_SUBMISSION_POSE_GATE = True
-SUBMISSION_SBE_THRESHOLD = 2.88   # shoulders_below_eyes < umbral → demand/submission
-SUBMISSION_SBE_PART_CONF = 0.3    # conf mínima de ojos/hombros para fiar el cálculo
+# GATE DE POSE PARA demand/submission — ELIMINADO el 2026-07-27.
+# Vivía aquí (ENABLE_SUBMISSION_POSE_GATE / SUBMISSION_SBE_THRESHOLD=2.88 /
+# SUBMISSION_SBE_PART_CONF) y en processing/image.py. Reescribía demand/affiliation
+# → demand/submission cuando (y_hombros−y_ojos)/dist_inter_ocular < 2.88. Medido:
+# NO detecta picado sino POSTURA ENCORVADA (apoyarse de codos, mano en la barbilla)
+# → en el sample 500 de IG 16 de 21 submissions eran falsas (precisión 24%); en
+# TikTok 35 espurias. Sustituido por la 4ª clase en el prompt (`prompts_qwen3` VH,
+# 22/24 con 0 falsos positivos en el banco FLUX), que además funciona en vídeo,
+# donde el gate nunca existió.
 
 # ============================================================================
 # GEMMA-4 — Visual token budget por tarea (solo backend "transformers")

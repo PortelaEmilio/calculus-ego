@@ -5,6 +5,10 @@ Reemplaza 2-3 llamadas VLM separadas (activity + location [+ social_distance])
 por UNA sola llamada con un prompt multi-tarea que recibe la imagen completa
 con la persona destacada en amarillo.
 
+`classify_location_only()` (2026-08-31) cubre el caso complementario: imágenes y
+escenas de vídeo SIN ninguna persona detectada, donde no hay TARGET que resaltar y
+solo tiene sentido preguntar por la ubicación sobre el frame completo.
+
 El prompt se construye por crop según `flags_include_social_distance`: cuando
 el gate determinista de social_distance trigea (≥4 personas o 0 hombros), la
 distancia social ya está decidida y NO se incluye en este prompt; cuando no
@@ -283,6 +287,41 @@ class SceneContextClassifier:
             print(f"    ✅ Persona {i+1}: {activity}, {location}{sd_log}")
 
         return activity_results, location_results, social_distance_results
+
+    def classify_location_only(self, frame: np.ndarray) -> dict | None:
+        """Ubicación de una imagen/escena SIN ninguna persona detectada (2026-08-31).
+
+        UNA llamada VLM sobre el frame COMPLETO con un prompt que no menciona al
+        TARGET (`build_location_only_prompt`): sin caja amarilla, el prompt de escena
+        afirmaría algo falso sobre la imagen. Reusa `_parse_location`, así que hereda
+        el closed-set y el fallback `LOCATION_FALLBACK`.
+
+        Returns:
+            El mismo dict que las entradas de `location_results` de `classify_batch`
+            ({"location", "raw_response", "success"}), o **None** si el módulo de
+            prompts activo no expone la variante sin persona (módulos de rollback
+            como `prompts_ollama_cot`) → el llamante simplemente no anota ubicación.
+        """
+        builder = getattr(prompts_module, "build_location_only_prompt", None)
+        if builder is None:
+            return None
+        if not self.is_loaded():
+            return {"location": None, "error": "Backend not loaded", "success": False}
+
+        try:
+            if frame is None or getattr(frame, "size", 0) == 0:
+                raise ValueError("Invalid frame")
+            pil_image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            output_text = (self.backend.generate(
+                pil_image, builder(), max_new_tokens=config.VLM_MAX_TOKENS,
+            ) or "").strip()
+        except Exception as e:
+            print(f"    ❌ Ubicación de escena (sin personas): {e}")
+            return {"location": None, "error": str(e), "success": False}
+
+        location = _parse_location(output_text)
+        print(f"    🗺️  Sin personas → ubicación: {location}")
+        return {"location": location, "raw_response": output_text, "success": True}
 
     @staticmethod
     def _all_errors(n: int, error: str) -> tuple[list, list, list]:

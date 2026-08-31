@@ -785,6 +785,35 @@ def analyze_scene_vlm(best_candidates: dict, first_frame, scene_num: int,
             general_crops.append(general['crop'])
             general_track_ids.append(track_id)
 
+    # ── Ubicación de la ESCENA cuando no hay ninguna persona analizable ──────
+    # (2026-08-31) Sin crops no se llama a Merge B, así que la escena no aportaba
+    # NINGUNA ubicación. Una sola llamada sobre el frame completo con el prompt sin
+    # TARGET; la entrada lleva `track_id=None` y entra en `location_statistics` por la
+    # vía normal (`_make_stats` ya ignora los None al contar tracks únicos).
+    if not general_crops:
+        import config as _cfg_loc
+        if (first_frame is not None
+                and ENABLE_LOCATION_CLASSIFICATION
+                and getattr(_cfg_loc, "ENABLE_SCENE_LOCATION_NO_PERSON", True)
+                and scene_context_classifier is not None):
+            _scene_loc = scene_context_classifier.classify_location_only(first_frame)
+            if _scene_loc and _scene_loc.get("success"):
+                classifications['location'].append({
+                    "track_id": None,          # entrada de ESCENA, no de persona
+                    "frame": scene_start_frame,
+                    "scene": scene_num,
+                    "scene_level": True,
+                    "location": _scene_loc.get("location"),
+                    "raw_response": _scene_loc.get("raw_response"),
+                })
+                # Clave None: nunca colisiona con un track_id real. La lee
+                # `_dump_scene_validation` para anotar la ubicación de la escena vacía.
+                location_cache[None] = {
+                    "location": _scene_loc.get("location"),
+                    "last_frame": scene_start_frame,
+                    "raw_response": _scene_loc.get("raw_response"),
+                }
+
     use_merged = (
         person_attributes_classifier is not None
         and person_attributes_classifier.is_loaded()
@@ -1177,11 +1206,16 @@ def _dump_scene_validation(validation_scenes, video_stem, output_dir,
             'social_distance':      None,   # rellenado post-bucle por (track_id, frame∈escena)
         })
 
+    # Ubicación de la escena SIN personas (2026-08-31): `analyze_scene_vlm` la deja en
+    # el cache de location bajo la clave None (nunca colisiona con un track_id real).
+    scene_location = (caches.get('location') or {}).get(None)
+
     validation_scenes.append({
         'scene_label': str(scene_label),
         'start_frame': int(start_frame),
         'end_frame': int(end_frame),
         'frame_path': frame_path,
+        'location': scene_location.get('location') if scene_location else None,
         'persons': persons,
     })
 

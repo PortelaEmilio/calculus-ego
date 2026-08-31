@@ -31,7 +31,7 @@ import config
 from config import (
     DETECTION_MODEL, POSE_MODEL,
     ENABLE_TRACKING, ENABLE_POSE_ESTIMATION, ENABLE_BODY_SHAPE_CLASSIFICATION,
-    ENABLE_SOCIAL_DISTANCE,
+    ENABLE_SOCIAL_DISTANCE, ENABLE_LOCATION_CLASSIFICATION,
     CONFIDENCE_THRESHOLD, IOU_THRESHOLD, PERSON_CLASS_ID, TRACKER_CONFIG,
     MAX_SCENE_FRAMES_IN_MEMORY,
 )
@@ -230,7 +230,8 @@ def detect_video_scenes(video_path: Path, model_detect, model_pose,
                 info(f"    [dim]dedup escena {label}: {n_before} → {len(sub_best)} personas")
         safe = str(label).replace(".", "_")
         frame_file = full_frames_dir / f"{stem}_scene_{safe}.jpg"
-        if first_frame is not None and first_frame.size > 0:
+        wrote_frame = first_frame is not None and first_frame.size > 0
+        if wrote_frame:
             cv2.imwrite(str(frame_file), first_frame)
         persons = []
         for pidx, (tid, cand) in enumerate(sub_best.items()):
@@ -256,7 +257,13 @@ def detect_video_scenes(video_path: Path, model_detect, model_pose,
                 'body_crop_file': str(body_file) if body_file else None,
                 'beauty_crop_file': str(beauty_file) if beauty_file else None,
             })
-        if persons:
+        # 2026-08-31: una (sub)escena SIN personas ya NO se descarta — sobrevive con
+        # `persons: []` para que la Fase B pueda clasificar SOLO la ubicación sobre
+        # `frame_file` (vídeos de tarjeta de texto, capturas, paisajes). Requiere que el
+        # frame se haya escrito: es el único input que le queda a la Fase B. Con el flag
+        # apagado se mantiene el comportamiento previo (la escena se descarta entera).
+        if persons or (wrote_frame
+                       and getattr(config, "ENABLE_SCENE_LOCATION_NO_PERSON", True)):
             out_scenes.append({
                 'scene_label': str(label),
                 'start_frame': int(sub_start_global),
@@ -397,6 +404,27 @@ def categorize_video_scenes(meta: dict, models: dict) -> dict:
             all_tracks.add(tid)
 
         if not best_candidates:
+            # 2026-08-31: escena sin personas → una sola llamada VLM para la UBICACIÓN
+            # sobre el frame de escena. Si no hay frame en disco (crops/frames efímeros
+            # ya borrados) o el flag está apagado, se descarta como antes.
+            sc_ctx = models.get('scene_context_classifier')
+            frame_file = sc.get('frame_file')
+            if not (getattr(config, "ENABLE_SCENE_LOCATION_NO_PERSON", True)
+                    and ENABLE_LOCATION_CLASSIFICATION and sc_ctx is not None
+                    and frame_file and Path(frame_file).exists()):
+                continue
+            empty_frame = cv2.imread(frame_file)
+            r = sc_ctx.classify_location_only(empty_frame) if empty_frame is not None else None
+            if not (r and r.get('success')):
+                continue
+            out_scenes.append({
+                'scene_label': sc['scene_label'],
+                'start_frame': sc['start_frame'],
+                'end_frame': sc['end_frame'],
+                'frame_path': frame_file,
+                'location': r.get('location'),
+                'persons': [],
+            })
             continue
 
         first_frame = (cv2.imread(sc['frame_file'])
