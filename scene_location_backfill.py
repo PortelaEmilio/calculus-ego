@@ -87,10 +87,12 @@ def unwrap(summary: dict) -> dict:
     return inner if isinstance(inner, dict) else summary
 
 
-def has_scene_location(payload: dict) -> bool:
-    """¿El resultado ya tiene una entrada de ubicación de ESCENA (track_id None)?"""
-    return any(e.get("track_id") is None
-               for e in (payload.get("location_classifications") or []))
+def get_scene_location(payload: dict) -> str | None:
+    """Ubicación de ESCENA ya presente en el resultado (entrada con track_id None), o None."""
+    for e in (payload.get("location_classifications") or []):
+        if e.get("track_id") is None:
+            return e.get("location")
+    return None
 
 
 def scan_run(run_dir: Path):
@@ -99,7 +101,7 @@ def scan_run(run_dir: Path):
     if not json_dir.is_dir():
         error(f"  No existe {json_dir}")
         return None
-    candidates, videos, done = [], [], 0
+    candidates, videos, already = [], [], []
     for jf in sorted(json_dir.glob("summary_*.json")):
         try:
             with open(jf, "r", encoding="utf-8") as f:
@@ -117,15 +119,20 @@ def scan_run(run_dir: Path):
             continue
         if payload.get("persons_detected", 0) != 0:
             continue
-        if has_scene_location(payload):
-            done += 1
-            continue
         src = payload.get("input_path") or summary.get("input_path")
+        prev = get_scene_location(payload)
+        if prev is not None:
+            # Ya puntuada en una pasada anterior. NO se vuelve a llamar al VLM, pero SÍ
+            # entra en el sidecar/merge: sin esto, reanudar un run interrumpido fusionaría
+            # solo lo puntuado en la última pasada y dejaría el resto fuera del xlsx.
+            if src:
+                already.append((Path(src), prev))
+            continue
         if not src or not Path(src).exists():
             warn(f"  imagen original no encontrada ({jf.name}) → se salta")
             continue
         candidates.append((jf, summary, payload, Path(src)))
-    return candidates, videos, done
+    return candidates, videos, already
 
 
 def merge_into_master(master_path: str, df_rows: pd.DataFrame, sheet: str, backup: bool):
@@ -193,10 +200,11 @@ def main():
     scanned = scan_run(run_dir)
     if scanned is None:
         sys.exit(1)
-    candidates, videos, done = scanned
+    candidates, videos, already = scanned
     info(f"  Candidatos (imagen, 0 personas, sin ubicación): [cyan]{len(candidates)}")
-    if done:
-        info(f"  Ya tenían ubicación de escena: [dim]{done}")
+    if already:
+        info(f"  Ya puntuadas en pasadas anteriores: [dim]{len(already)}[/] "
+             "(no se re-puntúan, pero sí se fusionan)")
     if videos:
         warn(f"  {len(videos)} vídeo(s) sin escenas NO son backfilleables "
              "(la Fase A antigua no registraba las escenas vacías y sus frames son efímeros)")
@@ -209,14 +217,21 @@ def main():
         candidates = candidates[:args.limit]
         info(f"  --limit {args.limit} → se procesan {len(candidates)}")
     if not candidates:
-        info("  Nada que hacer."); return
+        if already and (args.output or args.merge_into) and not args.dry_run:
+            info("  Nada que puntuar; se fusiona lo ya puntuado.")
+        else:
+            info("  Nada que hacer."); return
     if args.dry_run:
         for jf, _s, _p, src in candidates[:20]:
             info(f"    [dim]{src.name}")
         info("  --dry-run: no se ha llamado al VLM ni se ha escrito nada."); return
 
-    clf = build_scene_classifier()
-    rows, n_fail = [], 0
+    # Semilla: lo puntuado en pasadas anteriores, para que el merge sea COMPLETO.
+    rows = [{"Img ID": src.stem, "Archivo": src.name, "Ruta Img.": str(src),
+             UBIC_COL: loc, "Ruta JSON": None} for src, loc in already]
+    n_fail = 0
+    # El VLM solo se carga si hay algo que puntuar (reanudar y fusionar no lo necesita).
+    clf = build_scene_classifier() if candidates else None
     with make_progress() as progress:
         task = progress.add_task("Ubicación de escena", total=len(candidates))
         for jf, summary, payload, src in candidates:
@@ -244,7 +259,10 @@ def main():
                 "Ruta JSON": str(jf),
             })
 
-    success(f"  {len(rows)} imagen(es) con ubicación nueva" + (f" · {n_fail} fallo(s)" if n_fail else ""))
+    n_new = len(rows) - len(already)
+    success(f"  {n_new} imagen(es) puntuadas ahora"
+            + (f" + {len(already)} de pasadas anteriores = {len(rows)} a fusionar" if already else "")
+            + (f" · {n_fail} fallo(s)" if n_fail else ""))
     if not rows:
         return
     df_rows = pd.DataFrame(rows)
