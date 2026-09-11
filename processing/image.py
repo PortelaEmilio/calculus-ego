@@ -34,7 +34,7 @@ from utils.visualization import (
     put_text_pil, draw_skeleton, draw_detection_with_info, save_person_crop,
     draw_corner_bbox, draw_all_person_chips, build_person_display_attrs,
     render_person_annotated_crop, save_person_annotated_crop,
-    is_waist_visible, is_shoulder_visible, is_frontal_pose_with_waist, has_five_face_keypoints_visible,
+    is_waist_visible, is_shoulder_visible, is_frontal_pose_with_waist, count_face_keypoints_visible,
     extract_face_crop, get_color_for_track_id, count_visible_keypoints, draw_scene_number,
     bbox_occupancy,
 )
@@ -463,16 +463,21 @@ def annotate_frame(frame: np.ndarray, results_detect, results_pose,
                 indices_to_analyze_scene.append(crop_idx)
                 flags_include_social_distance.append(include_sd_in_scene)
 
-            # ---- Beauty (gate por keypoints faciales) ------------------
+            # ---- Beauty (gate por keypoints faciales y tamaño de cabeza) --
+            # Mismos gates que el pase diferido (beauty_pass.py) y el vídeo: ≥
+            # BEAUTY_MIN_FACE_KEYPOINTS keypoints faciales y cabeza ≥ BEAUTY_MIN_HEAD_PX. Por
+            # debajo de ese tamaño la cara queda fuera de la distribución de los datasets de
+            # belleza y la nota se ancla baja.
             if ENABLE_BEAUTY_ESTIMATION and beauty_estimator is not None and track_id not in beauty_cache:
-                if kpts is not None:
-                    if has_five_face_keypoints_visible(kpts):
-                        face_crop = extract_face_crop(frame, kpts, (x1, y1, x2, y2))
-                        if face_crop is not None and face_crop.size > 0:
+                if kpts is not None and count_face_keypoints_visible(kpts) >= config.BEAUTY_MIN_FACE_KEYPOINTS:
+                    face_crop = extract_face_crop(frame, kpts, (x1, y1, x2, y2),
+                                                  min_points=config.BEAUTY_MIN_FACE_KEYPOINTS)
+                    if face_crop is not None and face_crop.size > 0:
+                        if min(face_crop.shape[:2]) >= config.BEAUTY_MIN_HEAD_PX:
                             crops_to_analyze_beauty.append(face_crop)
                             indices_to_analyze_beauty.append(crop_idx)
-                    else:
-                        beauty_cache[track_id] = {"score": None, "not_calculable": True}
+                        else:
+                            beauty_cache[track_id] = {"score": None, "not_calculable": True}
                 else:
                     beauty_cache[track_id] = {"score": None, "not_calculable": True}
 
