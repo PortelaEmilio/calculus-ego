@@ -29,6 +29,9 @@ sample 500 real (pendiente). Rollback a gemma-4: restaurar `config.before_qwen35
 """
 import os
 import re
+import threading as _threading
+import time as _time
+from collections import deque as _deque
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
@@ -45,6 +48,87 @@ from .backends.base import VLMBackend
 QWEN35_IMG_MAX = int(os.environ.get("QWEN35_IMG_MAX", "896"))
 
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+
+class _Throughput:
+    """Contador de velocidad de generación del VLM (tokens nuevos / s de `generate`).
+
+    Mide SOLO el tiempo dentro de `model.generate` — no YOLO, ni el preprocesado de
+    imagen, ni la E/S — que es lo que dice si el modelo va a la velocidad esperada.
+    El cliente va en serie, pero se protege con un lock por si algún path llama en
+    paralelo. `reciente` es una media móvil de las últimas llamadas, para ver caídas
+    (p.ej. una imagen enorme) sin que las diluya el acumulado del run.
+    """
+
+    VENTANA = 20
+
+    def __init__(self):
+        self._lock = _threading.Lock()
+        self.tokens = 0
+        self.segundos = 0.0
+        self.llamadas = 0
+        self._ultimas = _deque(maxlen=self.VENTANA)
+
+    def registrar(self, n_tokens, segundos):
+        if n_tokens <= 0 or segundos <= 0:
+            return
+        with self._lock:
+            self.tokens += n_tokens
+            self.segundos += segundos
+            self.llamadas += 1
+            self._ultimas.append((n_tokens, segundos))
+
+    def stats(self):
+        with self._lock:
+            glob = self.tokens / self.segundos if self.segundos else 0.0
+            tk = sum(t for t, _ in self._ultimas)
+            sg = sum(s for _, s in self._ultimas)
+            return {"tokens": self.tokens, "segundos": self.segundos,
+                    "llamadas": self.llamadas, "tok_s": glob,
+                    "tok_s_reciente": (tk / sg if sg else 0.0)}
+
+    def resumen(self):
+        """Línea corta para la barra de progreso: '12.4 tok/s (últ. 11.8) · 1.2k llam.'"""
+        st = self.stats()
+        if not st["llamadas"]:
+            return "— tok/s"
+        n = st["llamadas"]
+        n_txt = f"{n/1000:.1f}k" if n >= 1000 else str(n)
+        return (f"{st['tok_s']:.1f} tok/s (últ. {st['tok_s_reciente']:.1f}) · {n_txt} llam.")
+
+
+THROUGHPUT = _Throughput()
+
+
+class _OomCounter:
+    """Cuenta los OOM de CUDA que NO se pudieron recuperar.
+
+    Sirve para que el orquestador sepa que las clasificaciones de un fichero
+    salieron degradadas y NO escriba su `summary_<stem>.json`: si lo escribiera,
+    la reanudación lo daría por hecho y el fichero quedaría con todo a
+    'no visible' PARA SIEMPRE (pérdida silenciosa, el mismo modo de fallo que el
+    phase1 huérfano).
+    """
+
+    def __init__(self):
+        self._lock = _threading.Lock()
+        self.n = 0
+        self.recuperados = 0
+
+    def fallo(self):
+        with self._lock:
+            self.n += 1
+
+    def recuperado(self):
+        with self._lock:
+            self.recuperados += 1
+
+    def total(self):
+        with self._lock:
+            return self.n
+
+
+OOM = _OomCounter()
 
 
 class Qwen35VLMBackend(VLMBackend):
@@ -175,12 +259,30 @@ class Qwen35VLMBackend(VLMBackend):
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
 
-        with torch.inference_mode():
-            out = self.model.generate(
-                **inputs, max_new_tokens=max_new_tokens, do_sample=False,
-                num_beams=1, temperature=None, top_p=None, top_k=None,
-                pad_token_id=self.processor.tokenizer.eos_token_id,
-            )
+        gen_kw = dict(max_new_tokens=max_new_tokens, do_sample=False, num_beams=1,
+                      temperature=None, top_p=None, top_k=None,
+                      pad_token_id=self.processor.tokenizer.eos_token_id)
+        _t0 = _time.perf_counter()
+        try:
+            with torch.inference_mode():
+                out = self.model.generate(**inputs, **gen_kw)
+        except torch.cuda.OutOfMemoryError:
+            # La causa habitual NO es falta de memoria real sino fragmentación (o un
+            # proceso vecino que la libera enseguida). Vaciar la caché del allocator y
+            # repetir la MISMA llamada recupera la mayoría, sin tocar la resolución
+            # (bajarla cambiaría el resultado y el modelo dejaría de ser reproducible).
+            torch.cuda.empty_cache()
+            try:
+                with torch.inference_mode():
+                    out = self.model.generate(**inputs, **gen_kw)
+                OOM.recuperado()
+            except torch.cuda.OutOfMemoryError:
+                OOM.fallo()
+                torch.cuda.empty_cache()
+                raise
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()   # generate es async en CUDA: sin esto el tiempo sale falso
+        THROUGHPUT.registrar(int(out.shape[1]) - in_len, _time.perf_counter() - _t0)
         text = self.processor.tokenizer.decode(
             out[0][in_len:], skip_special_tokens=True)
         if torch.cuda.is_available():

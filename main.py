@@ -32,6 +32,38 @@ from processing.batch import process_batch
 from ui import console, header, info, success, warn, error, kv_table, dist_table
 
 
+def vlm_rate_text():
+    """Velocidad de generación del VLM ('12.4 tok/s (últ. 11.8) · 320 llam.').
+
+    Devuelve "" si el backend activo no la instrumenta (Ollama, gemma4…), así que
+    es seguro llamarla desde cualquier modo.
+    """
+    try:
+        from models.qwen35_vlm_backend import THROUGHPUT
+    except Exception:
+        return ""
+    return THROUGHPUT.resumen()
+
+
+def vlm_oom_count():
+    """OOM de CUDA NO recuperados hasta ahora (0 si el backend no los cuenta)."""
+    try:
+        from models.qwen35_vlm_backend import OOM
+    except Exception:
+        return 0
+    return OOM.total()
+
+
+def vlm_rate_stats():
+    """Contadores crudos del VLM, o None si el backend no los lleva."""
+    try:
+        from models.qwen35_vlm_backend import THROUGHPUT
+    except Exception:
+        return None
+    st = THROUGHPUT.stats()
+    return st if st.get("llamadas") else None
+
+
 # ── Esquema de salida y constructores de filas (compartidos por `manual` y `carpeta`) ──
 # Extraídos de _process_manual a nivel de módulo para que el modo `carpeta`
 # (_process_directory) los reutilice sin duplicar. `run_id` pasa como parámetro.
@@ -275,9 +307,16 @@ def _process_manual(args, models):
     """Procesa imágenes únicas de un Excel manual y emite un qwen_*.xlsx."""
     from ui import console
     from rich.progress import (
-        BarColumn, MofNCompleteColumn, Progress, SpinnerColumn,
+        BarColumn, MofNCompleteColumn, Progress, ProgressColumn, SpinnerColumn,
         TextColumn, TimeElapsedColumn, TimeRemainingColumn,
     )
+    from rich.text import Text
+
+    class TokRateColumn(ProgressColumn):
+        """Velocidad del VLM en vivo (tokens generados / s dentro de `generate`)."""
+
+        def render(self, task):
+            return Text(vlm_rate_text(), style="magenta")
 
     manual_path = Path(args.manual_xlsx).expanduser().resolve()
     if not manual_path.exists():
@@ -427,6 +466,7 @@ def _process_manual(args, models):
             MofNCompleteColumn(),
             TimeElapsedColumn(),
             TimeRemainingColumn(),
+            TokRateColumn(),
             console=console,
         )
         vtask = vprogress.add_task("[cyan]Vídeos", total=len(vids))
@@ -473,6 +513,10 @@ def _process_manual(args, models):
                         os.unlink(job_path)
                     except OSError:
                         pass
+                    # Un subproceso de Fase A que sobreviva retiene ~1 GB de VRAM
+                    # (contexto CUDA + YOLO) durante toda la Fase B y provoca OOM en las
+                    # escenas con mucha gente. Barrer los que queden vivos.
+                    _sweep_stray_phase_a()
                     vprogress.start()  # reanuda la barra tras la Fase A
             else:
                 console.print("  [dim]↻ resume: nada que detectar en esta tanda")
@@ -536,6 +580,7 @@ def _process_manual(args, models):
         MofNCompleteColumn(),
         TimeElapsedColumn(),
         TimeRemainingColumn(),
+        TokRateColumn(),
         console=console,
     ) as progress:
         task = progress.add_task("Procesando imágenes", total=len(unique_images))
@@ -739,9 +784,16 @@ def _process_directory(args, models):
     import subprocess
     import tempfile
     from rich.progress import (
-        BarColumn, MofNCompleteColumn, Progress, SpinnerColumn,
+        BarColumn, MofNCompleteColumn, Progress, ProgressColumn, SpinnerColumn,
         TextColumn, TimeElapsedColumn, TimeRemainingColumn,
     )
+    from rich.text import Text
+
+    class TokRateColumn(ProgressColumn):
+        """Velocidad del VLM en vivo (tokens generados / s dentro de `generate`)."""
+
+        def render(self, task):
+            return Text(vlm_rate_text(), style="magenta")
     from processing.video_validation import categorize_video_scenes, stop_gemma4
     from processing.metadata_join import build_default_index, build_metadata_index, DEFAULT_SOURCES
 
@@ -901,7 +953,7 @@ def _process_directory(args, models):
         vprogress = Progress(
             SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
             BarColumn(), MofNCompleteColumn(), TimeElapsedColumn(), TimeRemainingColumn(),
-            console=console)
+            TokRateColumn(), console=console)
         # Contador PERSISTENTE entre reanudaciones: la barra arranca en el nº de vídeos
         # que YA tienen summary (hechos en runs previos), no en 0. Al re-emitir esos
         # summaries NO se avanza (ya están contados); solo avanza el trabajo NUEVO.
@@ -952,6 +1004,10 @@ def _process_directory(args, models):
                         os.unlink(job_path)
                     except OSError:
                         pass
+                    # Un subproceso de Fase A que sobreviva retiene ~1 GB de VRAM
+                    # (contexto CUDA + YOLO) durante toda la Fase B y provoca OOM en las
+                    # escenas con mucha gente. Barrer los que queden vivos.
+                    _sweep_stray_phase_a()
                     vprogress.start()
             else:
                 console.print("  [dim]↻ nada que detectar en esta tanda")
@@ -993,7 +1049,17 @@ def _process_directory(args, models):
                 try:
                     with open(phase1_file, "r", encoding="utf-8") as f:
                         vmeta = json.load(f)
+                    _oom0 = vlm_oom_count()
                     result = categorize_video_scenes(vmeta, models)
+                    if vlm_oom_count() > _oom0:
+                        # Clasificaciones degradadas por falta de VRAM: NO escribir el
+                        # summary. Con él, la reanudación daría el vídeo por hecho y sus
+                        # personas quedarían a 'no visible' para siempre.
+                        console.print(f"  [yellow]·[/] OOM de CUDA en {vpath.name}: "
+                                      "descartado, se reintentará al reanudar")
+                        errors.append(vid_id)
+                        vprogress.advance(vtask)
+                        continue
                     summary = {"run_id": run_id, "img_id": vid_id,
                                "input_path": str(vpath), "result": result}
                     with open(json_path, "w", encoding="utf-8") as f:
@@ -1049,6 +1115,7 @@ def _process_directory(args, models):
         if not path.exists():
             return stem, path, json_path, "missing", None, None
         try:
+            _oom0 = vlm_oom_count()
             result = process_image(
                 path, models['model_detect'], models['model_pose'], annot_dir,
                 beauty_estimator=models['beauty_estimator'],
@@ -1064,6 +1131,10 @@ def _process_directory(args, models):
                 person_attributes_classifier=models.get('person_attributes_classifier'),
                 scene_context_classifier=models.get('scene_context_classifier'),
             )
+            if vlm_oom_count() > _oom0:
+                # Igual que en vídeo: sin VRAM las clasificaciones salen a 'no visible'.
+                # Devolverlo como error deja la imagen SIN summary → se reintenta.
+                return stem, path, json_path, "oom", None, None
             return stem, path, json_path, "ok", result, None
         except Exception as e:
             return stem, path, json_path, "error", None, e
@@ -1076,7 +1147,7 @@ def _process_directory(args, models):
         with Progress(
             SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
             BarColumn(), MofNCompleteColumn(), TimeElapsedColumn(), TimeRemainingColumn(),
-            console=console) as progress:
+            TokRateColumn(), console=console) as progress:
             task = progress.add_task("Procesando imágenes", total=len(pending_imgs))
             with ThreadPoolExecutor(max_workers=file_workers) as pool:
                 futures = [pool.submit(_img_worker, s, p) for s, p in pending_imgs]
@@ -1086,6 +1157,10 @@ def _process_directory(args, models):
                         progress.update(task, description=f"[cyan]{path.name}")
                         if status == "missing":
                             console.print(f"  [yellow]·[/] No encontrada: [dim]{path}")
+                            errors.append(stem)
+                        elif status == "oom":
+                            console.print(f"  [yellow]·[/] OOM de CUDA en {path.name}: "
+                                          "descartada, se reintentará al reanudar")
                             errors.append(stem)
                         elif status == "error":
                             console.print(f"  [red]·[/] Error en {path.name}: [dim]{exc}")
@@ -1141,6 +1216,52 @@ def _process_directory(args, models):
     _flush_directory_excel(all_rows, meta, output_path, run_dir)
     console.print(f"  [green]✓[/] {output_path}")
     console.print(f"  [dim]filas={len(all_rows)}  nuevos={new_done[0]}  errores={len(errors)}  run={run_id}")
+    _st = vlm_rate_stats()
+    if _st:
+        console.print(
+            f"  [dim]VLM: {_st['tokens']:,} tokens en {_st['segundos'] / 60:.1f} min de "
+            f"generación · {_st['tok_s']:.1f} tok/s · {_st['llamadas']:,} llamadas")
+
+
+def _sweep_stray_phase_a():
+    """Mata subprocesos HUÉRFANOS `-m processing.video_validation`.
+
+    `subprocess.run` espera a que el hijo termine, pero un run anterior
+    interrumpido puede dejar uno suelto: sigue reteniendo ~1 GB de VRAM (contexto
+    CUDA + YOLO) y deja al VLM sin margen → OOM en las escenas con mucha gente.
+
+    HUÉRFANO = su padre ya no es un `main.py` vivo (queda reparentado a init o a
+    systemd --user). Ese filtro es imprescindible: sin él, esta función mataría la
+    Fase A LEGÍTIMA de otro run que estuviera corriendo en paralelo.
+    """
+    import signal
+    import subprocess   # main.py no lo importa a nivel de módulo
+
+    def _ps(campo, pid):
+        try:
+            r = subprocess.run(["ps", "-o", campo + "=", "-p", str(pid)],
+                               capture_output=True, text=True, check=False)
+            return r.stdout.strip()
+        except Exception:
+            return ""
+
+    try:
+        out = subprocess.run(["pgrep", "-u", str(os.getuid()), "-f",
+                              "processing.video_validation"],
+                             capture_output=True, text=True, check=False)
+    except Exception:
+        return
+    for pid in (out.stdout or "").split():
+        if int(pid) == os.getpid():
+            continue
+        ppid = _ps("ppid", pid)
+        if ppid and ppid != "1" and "main.py" in _ps("args", ppid):
+            continue          # tiene un main.py vivo por padre → NO es huérfano
+        try:
+            os.kill(int(pid), signal.SIGTERM)
+            console.print(f"  [yellow]·[/] Fase A huérfana {pid} terminada (retenía VRAM)")
+        except (ProcessLookupError, PermissionError, ValueError):
+            pass
 
 
 def _stop_all_ollama():

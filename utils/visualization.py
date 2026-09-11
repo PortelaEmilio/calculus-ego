@@ -741,7 +741,9 @@ def build_person_display_attrs(gender_info=None, age_info=None, behaviour_info=N
     if age_info and age_info.get("success") and ENABLE_AGE_CLASSIFICATION:
         a = age_info.get("age_group")
         if not _blank(a):
-            attrs.append(("age", a.strip()))
+            # .capitalize() como en género: sin esto la edad era la única píldora
+            # en minúscula ("youth" junto a "Female", "Posing"…).
+            attrs.append(("age", a.strip().capitalize()))
 
     if behaviour_info and behaviour_info.get("success") and ENABLE_BEHAVIOUR_CLASSIFICATION:
         b = behaviour_info.get("behaviour")
