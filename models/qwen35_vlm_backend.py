@@ -202,7 +202,9 @@ class Qwen35VLMBackend(VLMBackend):
             return
         try:
             from peft import PeftModel
-            self.model = PeftModel.from_pretrained(self.model, adapter)
+            # Pesos del adapter a CPU y de ahí al dispositivo del modelo: cargarlos directamente en
+            # CUDA falla donde la GPU solo existe durante la llamada (ZeroGPU de Hugging Face).
+            self.model = PeftModel.from_pretrained(self.model, adapter, torch_device="cpu")
             self._has_beauty_adapter = True
             info(f"  Base COMPARTIDO: LoRA de belleza adjunto [dim]{adapter}[/] "
                  "(clasif. con adapter OFF · belleza con adapter ON)")
