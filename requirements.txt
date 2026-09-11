@@ -12,3 +12,4 @@ scenedetect[opencv]>=0.6.1
 qwen-vl-utils>=0.0.8
 pandas>=2.0.0
 tqdm>=4.65.0
+rich>=13.0

@@ -185,13 +185,21 @@ MAX_SCENE_FRAMES_IN_MEMORY = 4000     # Frames máximos bufferizados en RAM por 
 # CONFIGURACIÓN DE MODELOS
 # ============================================================================
 
-# Directorios
-OUTPUT_DIR = Path("/home/emilio/Documentos/#masculinity_IG/LLMs/Participation/participation_analysis")
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+# Directorios. CALCULUS_EGO_OUTPUT_DIR sobreescribe la ruta por defecto (la de la máquina
+# original). Si no se puede crear —otra máquina, un contenedor— se usa output/ dentro del
+# repo, que está en .gitignore.
+OUTPUT_DIR = Path(_os_pm.environ.get("CALCULUS_EGO_OUTPUT_DIR")
+                  or "/home/emilio/Documentos/#masculinity_IG/LLMs/Participation/participation_analysis")
+try:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+except OSError:
+    OUTPUT_DIR = Path(__file__).resolve().parent / "output"
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# Modelos YOLO26
-DETECTION_MODEL = "yolo26x.pt"      # Detección de personas (solo se carga si USE_POSE_AS_DETECTOR=False)
-POSE_MODEL = "yolo26x-pose.pt"      # Pose estimation
+# Modelos YOLO26. Relativos al directorio de trabajo por defecto; CALCULUS_EGO_POSE_MODEL y
+# CALCULUS_EGO_DETECTION_MODEL admiten una ruta absoluta.
+DETECTION_MODEL = _os_pm.environ.get("CALCULUS_EGO_DETECTION_MODEL") or "yolo26x.pt"  # solo si USE_POSE_AS_DETECTOR=False
+POSE_MODEL = _os_pm.environ.get("CALCULUS_EGO_POSE_MODEL") or "yolo26x-pose.pt"       # detección + pose
 
 # ⚙️ POSE-ÚNICO (2026-06-29): usar SOLO yolo26x-pose como detector + pose.
 # Validado sobre el banco FLUX social_distance: pose-único @640 iguala al dual
@@ -355,7 +363,9 @@ LLAMACPP_TIMEOUT = 300
 #          Riesgo: en algunos prompts complejos (Merge A) Gemma-4 con NF4
 #          contesta "na" a todo y dice "image is gray" — al parecer NF4
 #          degrada el vision tower de este modelo.
-VLM_QUANTIZATION = "nf4"   # PROD 2026-06-29 (transformers): NF4 (vision tower bf16); "none" para Ollama
+# Qwen35VLMBackend lo lee (nf4 | int8 | none); VLM_QUANTIZATION en el entorno lo sobreescribe
+# ("none" = bf16, para GPUs con memoria de sobra, p.ej. el Space de Hugging Face).
+VLM_QUANTIZATION = _os_pm.environ.get("VLM_QUANTIZATION") or "nf4"   # PROD 2026-06-29 (transformers): NF4
 
 # Implementación de atención del backend Transformers.
 #   "sdpa"  → PyTorch scaled_dot_product_attention (defecto seguro, funciona).

@@ -1,5 +1,5 @@
 """
-Backend VLM de CLASIFICACIÓN con Qwen3.5-9B (4-bit NF4) vía Transformers.
+Backend VLM de CLASIFICACIÓN con Qwen3.5-9B (NF4 por defecto; ver VLM_QUANTIZATION) vía Transformers.
 
 Drop-in de `VLMBackend`: implementa `is_loaded()`, `load()` (no-op), `generate()` y
 hereda `generate_batch()` (bucle secuencial) + `supports_real_batch = False`. Lo consumen
@@ -150,15 +150,30 @@ class Qwen35VLMBackend(VLMBackend):
                 AutoModelForImageTextToText, AutoProcessor, BitsAndBytesConfig)
 
             self.torch = torch
-            quant = BitsAndBytesConfig(
-                load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16,
-                bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True,
-            )
-            info(f"  Backend VLM clasificación: [dim]Qwen3.5-9B {base} · attn=eager · nf4")
+            # Cuantización según config.VLM_QUANTIZATION: "nf4" (por defecto, la de producción
+            # en la 4070 de 12 GB), "int8", o "none" = bf16 sin bitsandbytes (GPUs grandes).
+            quant_mode = str(getattr(config, "VLM_QUANTIZATION", "nf4")).lower()
+            if quant_mode == "nf4":
+                quant = BitsAndBytesConfig(
+                    load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16,
+                    bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True,
+                )
+            elif quant_mode == "int8":
+                quant = BitsAndBytesConfig(load_in_8bit=True)
+            elif quant_mode in ("none", "bf16"):
+                quant = None
+            else:
+                raise ValueError(f"VLM_QUANTIZATION no soportado: {quant_mode!r} "
+                                 "(nf4 | int8 | none)")
+            # GPU 0 entera por defecto; CALCULUS_EGO_DEVICE_MAP admite "auto", "cuda",
+            # "cpu" o un índice de GPU.
+            dm = os.environ.get("CALCULUS_EGO_DEVICE_MAP", "").strip()
+            device_map = ({"": int(dm)} if dm.isdigit() else dm) if dm else {"": 0}
+            info(f"  Backend VLM clasificación: [dim]Qwen3.5-9B {base} · attn=eager · {quant_mode}")
             # AutoModelForImageTextToText → Qwen3_5ForConditionalGeneration (con vision tower).
             # attn eager: requerido por la atención lineal GatedDeltaNet de qwen3_5.
             self.model = AutoModelForImageTextToText.from_pretrained(
-                base, quantization_config=quant, device_map={"": 0},
+                base, quantization_config=quant, device_map=device_map,
                 dtype=torch.bfloat16, trust_remote_code=True,
                 attn_implementation="eager",
             )
