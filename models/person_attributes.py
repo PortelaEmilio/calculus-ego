@@ -24,6 +24,7 @@ from importlib import import_module
 
 import config
 from models.accessory import ACCESSORY_CATEGORIES
+from models.behaviour import to_output_behaviour
 
 prompts_module = import_module(f"models.{getattr(config, 'VLM_PROMPT_MODULE', 'prompts_it')}")
 
@@ -149,7 +150,9 @@ def _parse_age(text: str) -> str | None:
 # (`behaviour: affiliation`). El sufijo determina unívocamente la categoría
 # (los tres affiliation/seduction/submission son demand/*, ideal es offer/*),
 # así que mapearlo es seguro. Orden: sufijos más largos primero para evitar
-# que un substring corto gane.
+# que un substring corto gane. Este mapa y VALID_BEHAVIOURS describen lo que EMITE
+# el modelo; `_parse_behaviour` devuelve el nombre de salida (submission → power,
+# ver models/behaviour.py).
 _BEHAVIOUR_SUFFIX_MAP = {
     "affiliation": "demand/affiliation",
     "seduction":   "demand/seduction",
@@ -168,9 +171,9 @@ def _parse_behaviour(text: str) -> str | None:
     # 1) forma completa (`demand/affiliation`, `offer/ideal`) — la que emite Ollama.
     hit = next((b for b in VALID_BEHAVIOURS if b in raw), None)
     if hit:
-        return hit
+        return to_output_behaviour(hit)
     # 2) sufijo desnudo (`affiliation`, `ideal`) — la que emite Transformers.
-    return next((full for suf, full in _BEHAVIOUR_SUFFIX_MAP.items() if suf in raw), None)
+    return to_output_behaviour(next((full for suf, full in _BEHAVIOUR_SUFFIX_MAP.items() if suf in raw), None))
 
 
 def _parse_body_display(text: str) -> str | None:

@@ -8,6 +8,17 @@ from PIL import Image
 
 import config
 
+# Nombre de salida de las clases (2026-10-30): el picado implica que la persona retratada da
+# poder al espectador, así que la clase se publica como demand/power. El prompt y el modelo
+# SIGUEN usando demand/submission: la variante VH se validó con esa palabra (22/24, 0 falsos
+# positivos) y "power" sugeriría un contrapicado, lo contrario de lo que describe la clase.
+_BEHAVIOUR_OUTPUT_NAMES = {"demand/submission": "demand/power"}
+
+
+def to_output_behaviour(label: str | None) -> str | None:
+    """Traduce la clase que emite el modelo a su nombre de salida. El resto de valores y None pasan igual."""
+    return _BEHAVIOUR_OUTPUT_NAMES.get(label, label)
+
 
 class BehaviourClassifier:
     """
@@ -16,7 +27,7 @@ class BehaviourClassifier:
     Categorías:
     - demand/affiliation: Eye level, mirada directa, expresión neutral/amigable
     - demand/seduction: Mirada hacia arriba, cabeza inclinada, expresión seductora
-    - demand/submission: Mirada hacia abajo desde posición superior, expresión seria
+    - demand/power (demand/submission en el prompt): Mirada hacia abajo desde posición superior, expresión seria
     - offer/ideal: No engagement directo, mirada indirecta, presentación impersonal
     """
 
@@ -179,7 +190,7 @@ Response format:
         """Clasifica una sola imagen PIL."""
         try:
             output_text = self.backend.generate(pil_image, self.prompt, max_new_tokens=config.VLM_MAX_TOKENS)
-            behaviour = self._parse_response(output_text)
+            behaviour = to_output_behaviour(self._parse_response(output_text))
 
             return {
                 "behaviour": behaviour,

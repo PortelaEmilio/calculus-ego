@@ -15,7 +15,7 @@ Per detected person:
 
 - **Gender** — male / female
 - **Age** — childhood / youth / adulthood / old age
-- **Behaviour** — visual social semiotics (demand/affiliation, demand/seduction, demand/submission, offer/ideal)
+- **Behaviour** — visual social semiotics (demand/affiliation, demand/seduction, demand/power, offer/ideal)
 - **Activity** — sports / romance / posing / other
 - **Body display** — normal clothes / revealing clothes / partially naked / no clothes at all
 - **Location** — indoors / wilderness / city / no background. Also classified for images and
@@ -52,9 +52,12 @@ JSON + CSV per-person classifications
 ```
 
 Social distance is **deterministic from pose keypoints** (proxemic mapping from
-the lowest visible body part + bbox size). `demand/submission` is emitted by the
-VLM from the prompt, which describes it as a high-angle shot; it used to be
-decided by a pose gate on shoulder-vs-eye geometry, but that gate measured
+the lowest visible body part + bbox size). `demand/power` is emitted by the
+VLM from the prompt, which describes it as a high-angle shot: the angle implies
+that the person portrayed gives power to the viewer. The prompt still calls the
+class `demand/submission`, the word it was validated with, and the parser renames
+it on output. It used to be decided by a pose gate on shoulder-vs-eye geometry,
+but that gate measured
 hunched posture rather than camera elevation (24% precision on a 500-image
 Instagram sample) and was removed. A `BBOX_MIN_FRAME_RATIO` gate drops detections
 too small for the VLM to read; each person's **size/occupancy** is read straight from that bounding

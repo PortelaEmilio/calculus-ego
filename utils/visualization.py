@@ -666,7 +666,8 @@ def draw_skeleton(frame: np.ndarray, keypoints: np.ndarray, fade_alpha: float = 
 _BEHAVIOUR_LABELS = {
     "demand/affiliation": "Affiliation",
     "demand/seduction":   "Seduction",
-    "demand/submission":  "Submission",
+    "demand/power":       "Power",
+    "demand/submission":  "Power",   # summaries anteriores al renombrado
     "offer/ideal":        "Ideal",
 }
 _ACTIVITY_LABELS = {
